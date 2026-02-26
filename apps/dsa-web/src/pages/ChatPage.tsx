@@ -150,7 +150,8 @@ const ChatPage: React.FC = () => {
 
       if (!response.ok) {
         const errData = await response.json().catch(() => ({}));
-        const detail = (errData as { detail?: string }).detail || `HTTP ${response.status}`;
+        const errObj = errData as { detail?: string; message?: string };
+        const detail = errObj.detail || errObj.message || `HTTP ${response.status}`;
         if (response.status === 400 && String(detail).includes('not enabled')) {
           throw new Error('⚠️ Agent 模式未启用，请在 .env 中设置 AGENT_MODE=true 并重启服务。');
         }

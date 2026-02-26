@@ -805,13 +805,17 @@ class GeminiAnalyzer:
         def _build_base_request_kwargs() -> dict:
             # OpenAI-compatible path (DeepSeek, Qwen, etc.): add extra_body for thinking models
             model_name = self._current_model_name
+            temperature = generation_config.get('temperature', config.openai_temperature)
+            # Moonshot kimi-k2.5 only accepts an integer temperature value of 1.
+            if (model_name or "").lower().strip() == "kimi-k2.5":
+                temperature = 1
             kwargs = {
                 "model": model_name,
                 "messages": [
                     {"role": "system", "content": self.SYSTEM_PROMPT},
                     {"role": "user", "content": prompt},
                 ],
-                "temperature": generation_config.get('temperature', config.openai_temperature),
+                "temperature": temperature,
             }
             payload = get_thinking_extra_body(model_name)
             if payload:
