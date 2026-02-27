@@ -243,6 +243,7 @@ def get_history_detail(
 def get_history_news(
     record_id: int,
     limit: int = Query(20, ge=1, le=100, description="返回数量限制"),
+    refresh: bool = Query(False, description="是否强制回源刷新新闻"),
     db_manager: DatabaseManager = Depends(get_database_manager)
 ) -> NewsIntelResponse:
     """
@@ -261,7 +262,11 @@ def get_history_news(
     """
     try:
         service = HistoryService(db_manager)
-        items = service.get_news_intel_by_record_id(record_id=record_id, limit=limit)
+        items = service.get_news_intel_by_record_id(
+            record_id=record_id,
+            limit=limit,
+            force_refresh=refresh
+        )
 
         response_items = [
             NewsIntelItem(

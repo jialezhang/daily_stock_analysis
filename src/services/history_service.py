@@ -14,6 +14,8 @@ import logging
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 
+from src.config import get_config
+from src.search_service import SearchService
 from src.storage import DatabaseManager
 
 logger = logging.getLogger(__name__)
@@ -197,7 +199,12 @@ class HistoryService:
             logger.error(f"查询新闻情报失败: {e}", exc_info=True)
             return []
 
-    def get_news_intel_by_record_id(self, record_id: int, limit: int = 20) -> List[Dict[str, str]]:
+    def get_news_intel_by_record_id(
+        self,
+        record_id: int,
+        limit: int = 20,
+        force_refresh: bool = False
+    ) -> List[Dict[str, str]]:
         """
         根据分析历史记录 ID 获取关联的新闻情报
 
@@ -206,6 +213,7 @@ class HistoryService:
         Args:
             record_id: 分析历史记录主键 ID
             limit: 返回数量限制
+            force_refresh: 是否强制回源搜索并刷新新闻
 
         Returns:
             新闻情报列表（包含 title、snippet、url）
@@ -217,11 +225,94 @@ class HistoryService:
                 logger.warning(f"未找到 record_id={record_id} 的分析记录")
                 return []
 
-            # 从记录中获取 query_id，然后调用原方法
-            return self.get_news_intel(query_id=record.query_id, limit=limit)
+            # 从记录中获取 query_id，优先返回已有历史新闻
+            items = self.get_news_intel(query_id=record.query_id, limit=limit)
+            if items and not force_refresh:
+                return items
+
+            if not force_refresh:
+                return items
+
+            refreshed_items = self._refresh_news_for_record(record_id=record_id, limit=limit)
+            return refreshed_items if refreshed_items else items
 
         except Exception as e:
             logger.error(f"根据 record_id 查询新闻情报失败: {e}", exc_info=True)
+            return []
+
+    def _refresh_news_for_record(self, record_id: int, limit: int) -> List[Dict[str, str]]:
+        """
+        对指定历史记录执行一次回源搜索，并尝试写入数据库。
+
+        如果 URL 唯一约束导致无法关联到当前 query_id，则降级返回本次搜索结果，
+        确保前端点击“刷新”后仍可看到内容。
+        """
+        try:
+            record = self.db.get_analysis_history_by_id(record_id)
+            if not record:
+                return []
+
+            config = get_config()
+            search_service = SearchService(
+                bocha_keys=config.bocha_api_keys,
+                tavily_keys=config.tavily_api_keys,
+                brave_keys=config.brave_api_keys,
+                serpapi_keys=config.serpapi_keys,
+                news_max_age_days=config.news_max_age_days,
+            )
+
+            if not search_service.is_available:
+                logger.info("刷新新闻失败：未配置可用搜索引擎")
+                return []
+
+            stock_name = (record.name or "").strip() or f"股票{record.code}"
+            max_results = max(1, min(limit, 20))
+            response = search_service.search_stock_news(
+                stock_code=record.code,
+                stock_name=stock_name,
+                max_results=max_results
+            )
+
+            if not (response.success and response.results):
+                logger.info(
+                    f"刷新新闻未返回有效结果: record_id={record_id}, code={record.code}, error={response.error_message}"
+                )
+                return []
+
+            # 尝试持久化到当前 query_id
+            query_context = {
+                "query_id": record.query_id or "",
+                "query_source": "web",
+            }
+            self.db.save_news_intel(
+                code=record.code,
+                name=stock_name,
+                dimension="latest_news",
+                query=response.query,
+                response=response,
+                query_context=query_context
+            )
+
+            # 优先返回已关联到当前 query_id 的结果
+            items = self.get_news_intel(query_id=record.query_id, limit=limit)
+            if items:
+                return items
+
+            # 兜底：即使因 URL 去重未能关联 query_id，也返回本次刷新结果给前端
+            fallback_items: List[Dict[str, str]] = []
+            for r in response.results[:limit]:
+                snippet = (r.snippet or "").strip()
+                if len(snippet) > 200:
+                    snippet = f"{snippet[:197]}..."
+                fallback_items.append({
+                    "title": r.title or "",
+                    "snippet": snippet,
+                    "url": r.url or "",
+                })
+            return fallback_items
+
+        except Exception as e:
+            logger.error(f"刷新新闻失败: {e}", exc_info=True)
             return []
 
     def _fallback_news_by_analysis_context(self, query_id: str, limit: int) -> List[Any]:

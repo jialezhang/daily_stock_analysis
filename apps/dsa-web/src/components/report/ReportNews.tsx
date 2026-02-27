@@ -17,13 +17,13 @@ export const ReportNews: React.FC<ReportNewsProps> = ({ recordId, limit = 20 }) 
   const [items, setItems] = useState<NewsIntelItem[]>([]);
   const [error, setError] = useState<string | null>(null);
 
-  const fetchNews = useCallback(async () => {
+  const fetchNews = useCallback(async (refresh = false) => {
     if (!recordId) return;
     setIsLoading(true);
     setError(null);
 
     try {
-      const response = await historyApi.getNews(recordId, limit);
+      const response = await historyApi.getNews(recordId, limit, refresh);
       setItems(response.items || []);
     } catch (err) {
       setError(err instanceof Error ? err.message : '加载资讯失败');
@@ -37,7 +37,7 @@ export const ReportNews: React.FC<ReportNewsProps> = ({ recordId, limit = 20 }) 
     setError(null);
 
     if (recordId) {
-      fetchNews();
+      fetchNews(false);
     }
   }, [recordId, fetchNews]);
 
@@ -58,7 +58,7 @@ export const ReportNews: React.FC<ReportNewsProps> = ({ recordId, limit = 20 }) 
           )}
           <button
             type="button"
-            onClick={fetchNews}
+            onClick={() => fetchNews(true)}
             className="text-xs text-cyan hover:text-white transition-colors"
           >
             刷新
@@ -71,7 +71,7 @@ export const ReportNews: React.FC<ReportNewsProps> = ({ recordId, limit = 20 }) 
           <span>{error}</span>
           <button
             type="button"
-            onClick={fetchNews}
+            onClick={() => fetchNews(true)}
             className="text-xs text-cyan hover:text-white transition-colors"
           >
             重试

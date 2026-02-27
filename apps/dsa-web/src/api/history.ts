@@ -56,9 +56,9 @@ export const historyApi = {
    * @param recordId 分析历史记录主键 ID
    * @param limit 返回数量限制
    */
-  getNews: async (recordId: number, limit = 20): Promise<NewsIntelResponse> => {
+  getNews: async (recordId: number, limit = 20, refresh = false): Promise<NewsIntelResponse> => {
     const response = await apiClient.get<Record<string, unknown>>(`/api/v1/history/${recordId}/news`, {
-      params: { limit },
+      params: { limit, refresh },
     });
 
     const data = toCamelCase<NewsIntelResponse>(response.data);

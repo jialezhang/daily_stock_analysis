@@ -233,6 +233,8 @@ python main.py
 
 包含完整的配置管理、任务监控和手动分析功能。
 
+历史报告页「相关资讯」支持手动刷新；点击刷新会触发一次回源搜索，补齐旧记录中缺失的新闻条目。
+
 **可选密码保护**：在 `.env` 中设置 `ADMIN_AUTH_ENABLED=true` 可启用 Web 登录，首次访问在网页设置初始密码，保护 Settings 中的 API 密钥等敏感配置。详见 [完整指南](docs/full-guide.md)。
 
 ### 从图片添加股票
@@ -271,11 +273,17 @@ python main.py
    ```bash
    python main.py --webui       # 启动 Web 界面 + 执行定时分析
    python main.py --webui-only  # 仅启动 Web 界面
+   python main.py --serve-only --host 127.0.0.1 --port 8000  # 推荐：仅启动 API/Web 服务
    ```
 
 访问 `http://127.0.0.1:8000` 即可使用。
 
 > 也可以使用 `python main.py --serve` (等效命令)
+
+3. **健康检查**（可选）
+   ```bash
+   curl http://127.0.0.1:8000/api/health
+   ```
 
 ## 🗺️ Roadmap
 
