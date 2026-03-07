@@ -1867,30 +1867,6 @@ const PositionManagementPage: React.FC = () => {
           </div>
 
           <div className="relative rounded-2xl border border-white/10 bg-[linear-gradient(180deg,rgba(16,185,129,0.08),rgba(8,16,34,0.72))] p-4">
-            {hoveredOverviewItem && (
-              <div className="pointer-events-none absolute left-1/2 top-0 z-20 w-[min(92%,320px)] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-emerald-300/30 bg-[#0d1d18]/95 px-4 py-3 shadow-[0_18px_40px_rgba(0,0,0,0.45)] backdrop-blur">
-                <div className="text-[11px] font-semibold tracking-[0.18em] text-emerald-100/80 uppercase">当前高亮</div>
-                <div className="mt-1 text-base font-semibold text-emerald-50">{hoveredOverviewItem.assetSecondary}</div>
-                <div className="mt-2 flex items-center justify-between gap-3 text-xs">
-                  <span className="text-secondary">总价值</span>
-                  <span className="font-mono text-emerald-100">
-                    {getMaskedValueDisplay(
-                      `holdings-overview-value-${hoveredOverviewItem.assetSecondary}`,
-                      `${formatMoneyValue(hoveredOverviewItem.value)} ${outputCurrencyLabel}`,
-                    )}
-                  </span>
-                </div>
-                <div className="mt-1 flex items-center justify-between gap-3 text-xs">
-                  <span className="text-secondary">占比总资产</span>
-                  <span className="font-mono text-emerald-100">
-                    {getMaskedValueDisplay(
-                      `holdings-overview-ratio-${hoveredOverviewItem.assetSecondary}`,
-                      `${hoveredOverviewItem.ratioPct.toFixed(2)}%`,
-                    )}
-                  </span>
-                </div>
-              </div>
-            )}
             <div className="mb-4 flex items-start justify-between gap-3">
               <div>
                 <div className="text-[11px] font-semibold tracking-[0.18em] text-emerald-100/80 uppercase">持仓概览</div>
@@ -1936,7 +1912,40 @@ const PositionManagementPage: React.FC = () => {
               </div>
 
               <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
-                <div className="overflow-x-auto">
+                <div ref={holdingsOverviewTableWrapRef} className="relative overflow-x-auto">
+                  {hoveredOverviewItem && hoveredOverviewOverlay && (
+                    <div
+                      className="pointer-events-none absolute inset-x-0 z-20 px-1 transition-[top] duration-150 ease-out"
+                      style={{ top: hoveredOverviewOverlay.top, height: hoveredOverviewOverlay.height }}
+                    >
+                      <div className="h-full translate-y-[-1px]">
+                      <table className="w-full h-full text-xs border-separate border-spacing-0">
+                        <tbody>
+                          <tr className="shadow-[0_8px_18px_rgba(0,0,0,0.24),0_0_0_1px_rgba(16,185,129,0.10)]">
+                            <td className="rounded-l-xl border-y border-l border-emerald-300/22 bg-[linear-gradient(90deg,rgba(16,185,129,0.22),rgba(13,29,24,0.96)_18%,rgba(13,29,24,0.92))] py-2 pl-3 text-[13px] font-semibold text-emerald-50 backdrop-blur-md">
+                              <div className="flex items-center gap-2">
+                                <span className="h-2 w-2 rounded-full bg-emerald-300 shadow-[0_0_12px_rgba(110,231,183,0.55)]" />
+                                <span>{hoveredOverviewItem.assetSecondary}</span>
+                              </div>
+                            </td>
+                            <td className="border-y border-emerald-300/22 bg-[linear-gradient(180deg,rgba(18,32,29,0.96),rgba(11,24,23,0.92))] py-2 text-right font-mono text-[13px] text-emerald-100 backdrop-blur-md">
+                              {getMaskedValueDisplay(
+                                `holdings-overview-value-${hoveredOverviewItem.assetSecondary}`,
+                                formatMoneyValue(hoveredOverviewItem.value),
+                              )}
+                            </td>
+                            <td className="rounded-r-xl border-y border-r border-emerald-300/22 bg-[linear-gradient(180deg,rgba(18,32,29,0.96),rgba(11,24,23,0.92))] py-2 pr-3 text-right font-mono text-[13px] text-emerald-100 backdrop-blur-md">
+                              {getMaskedValueDisplay(
+                                `holdings-overview-ratio-${hoveredOverviewItem.assetSecondary}`,
+                                `${hoveredOverviewItem.ratioPct.toFixed(2)}%`,
+                              )}
+                            </td>
+                          </tr>
+                        </tbody>
+                      </table>
+                      </div>
+                    </div>
+                  )}
                   <table className="w-full text-xs">
                     <thead>
                       <tr className="border-b border-white/10 text-muted">
@@ -1952,27 +1961,27 @@ const PositionManagementPage: React.FC = () => {
                         </tr>
                       )}
                       {holdingsOverviewRows.map((item) => {
-                        const highlighted = hoveredSecondaryCategory === item.assetSecondary;
                         return (
                           <tr
                             key={`secondary-${item.assetSecondary}`}
-                            className={`border-b border-white/5 last:border-b-0 transition-all ${
-                              highlighted ? 'bg-emerald-400/10 shadow-[inset_0_0_0_1px_rgba(52,211,153,0.28)]' : ''
-                            }`}
+                            ref={(element) => {
+                              holdingsOverviewRowRefs.current[item.assetSecondary] = element;
+                            }}
+                            className="border-b border-white/5 last:border-b-0"
                           >
-                            <td className={`py-2 ${highlighted ? 'text-emerald-100 text-sm font-semibold' : 'text-white'}`}>{item.assetSecondary}</td>
+                            <td className="py-2 text-white">{item.assetSecondary}</td>
                             <td className="py-2 text-right">
                               {renderMaskableValue(
                                 `holdings-overview-value-${item.assetSecondary}`,
                                 formatMoneyValue(item.value),
-                                `font-mono ${highlighted ? 'text-emerald-100 text-sm' : 'text-secondary'}`,
+                                'font-mono text-secondary',
                               )}
                             </td>
                             <td className="py-2 text-right">
                               {renderMaskableValue(
                                 `holdings-overview-ratio-${item.assetSecondary}`,
                                 `${item.ratioPct.toFixed(2)}%`,
-                                `font-mono ${highlighted ? 'text-emerald-100 text-sm' : 'text-secondary'}`,
+                                'font-mono text-secondary',
                               )}
                             </td>
                           </tr>
