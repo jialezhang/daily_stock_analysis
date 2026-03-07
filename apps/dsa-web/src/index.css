@@ -700,6 +700,12 @@ body {
 .border-accent { border-color: var(--border-accent); }
 .border-purple { border-color: var(--border-purple); }
 
+/* Position management specific contrast boost */
+.position-management-bright {
+  --text-secondary: #c6d6f0;
+  --text-muted: #9ab1d4;
+}
+
 /* 发光效果 */
 .glow-cyan {
   box-shadow: 0 0 20px var(--color-cyan-glow);

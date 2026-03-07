@@ -145,6 +145,7 @@ class AnalysisService:
             "details": {
                 "news_summary": result.news_summary,
                 "technical_analysis": result.technical_analysis,
+                "technical_module": getattr(result, "technical_module", None),
                 "fundamental_analysis": result.fundamental_analysis,
                 "risk_warning": result.risk_warning,
             }

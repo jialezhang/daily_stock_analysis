@@ -1,5 +1,6 @@
 import type React from 'react';
 import type { ReportMeta, ReportSummary as ReportSummaryType } from '../../types/analysis';
+import type { ModuleRefreshState } from '../../utils/moduleRefresh';
 import { ScoreGauge, Card } from '../common';
 import { formatDateTime } from '../../utils/format';
 
@@ -7,6 +8,10 @@ interface ReportOverviewProps {
   meta: ReportMeta;
   summary: ReportSummaryType;
   isHistory?: boolean;
+  onRefreshAll?: () => void;
+  isRefreshingAll?: boolean;
+  refreshState?: ModuleRefreshState;
+  updatedAt?: string | null;
 }
 
 /**
@@ -14,8 +19,22 @@ interface ReportOverviewProps {
  */
 export const ReportOverview: React.FC<ReportOverviewProps> = ({
   meta,
-  summary
+  summary,
+  onRefreshAll,
+  isRefreshingAll = false,
+  refreshState = 'idle',
+  updatedAt,
 }) => {
+  const refreshText = refreshState === 'queued'
+    ? '排队中...'
+    : refreshState === 'running'
+      ? '更新中...'
+      : refreshState === 'succeeded'
+        ? '已更新'
+        : refreshState === 'failed'
+          ? '重试更新'
+          : '更新全部';
+
   // 根据涨跌幅获取颜色
   const getPriceChangeColor = (changePct: number | undefined): string => {
     if (changePct === undefined || changePct === null) return 'text-muted';
@@ -61,6 +80,9 @@ export const ReportOverview: React.FC<ReportOverviewProps> = ({
                   <span className="font-mono text-xs text-cyan bg-cyan/10 px-1.5 py-0.5 rounded">
                     {meta.stockCode}
                   </span>
+                  <span className="text-[11px] text-muted">
+                    全量更新于 {updatedAt || '未更新'}
+                  </span>
                   <span className="text-xs text-muted flex items-center gap-1">
                     <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
@@ -68,6 +90,16 @@ export const ReportOverview: React.FC<ReportOverviewProps> = ({
                     {formatDateTime(meta.createdAt)}
                   </span>
                 </div>
+              </div>
+              <div className="ml-2">
+                <button
+                  type="button"
+                  className="text-xs text-cyan hover:text-white transition-colors"
+                  onClick={onRefreshAll}
+                  disabled={isRefreshingAll}
+                >
+                  {refreshText}
+                </button>
               </div>
             </div>
 

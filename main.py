@@ -47,12 +47,14 @@ from typing import List, Optional, Tuple
 from data_provider.base import canonical_stock_code
 from src.core.pipeline import StockAnalysisPipeline
 from src.core.market_review import run_market_review
+from src.core.position_review import run_position_daily_review
 
 from src.config import get_config, Config
 from src.logging_config import setup_logging
 
 
 logger = logging.getLogger(__name__)
+LOCKED_WEB_PORT = 8001
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -167,8 +169,8 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         '--port',
         type=int,
-        default=8000,
-        help='FastAPI 服务端口（默认 8000）'
+        default=LOCKED_WEB_PORT,
+        help='FastAPI 服务端口（固定 8001）'
     )
 
     parser.add_argument(
@@ -344,6 +346,14 @@ def run_full_analysis(
             # 如果有结果，赋值给 market_report 用于后续飞书文档生成
             if review_result:
                 market_report = review_result
+
+        # 3. 每日仓位复盘（Telegram）
+        run_position_daily_review(
+            notifier=pipeline.notifier,
+            analyzer=pipeline.analyzer,
+            market_report=market_report,
+            send_notification=not args.no_notify,
+        )
 
         # Issue #190: 合并推送（个股+大盘复盘）
         if merge_notification and (results or market_report) and not args.no_notify:
@@ -538,12 +548,13 @@ def main() -> int:
     # === 启动 Web 服务 (如果启用) ===
     start_serve = (args.serve or args.serve_only) and os.getenv("GITHUB_ACTIONS") != "true"
 
-    # 兼容旧版 WEBUI_HOST/WEBUI_PORT：如果用户未通过 --host/--port 指定，则使用旧变量
+    # 兼容旧版 WEBUI_HOST；端口统一固定为 8001
     if start_serve:
         if args.host == '0.0.0.0' and os.getenv('WEBUI_HOST'):
             args.host = os.getenv('WEBUI_HOST')
-        if args.port == 8000 and os.getenv('WEBUI_PORT'):
-            args.port = int(os.getenv('WEBUI_PORT'))
+        if args.port != LOCKED_WEB_PORT:
+            logger.warning("检测到非标准端口 %s，已强制切换为 %s", args.port, LOCKED_WEB_PORT)
+        args.port = LOCKED_WEB_PORT
 
     bot_clients_started = False
     if start_serve:

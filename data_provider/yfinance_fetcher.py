@@ -153,11 +153,15 @@ class YfinanceFetcher(BaseFetcher):
         logger.debug(f"调用 yfinance.download({yf_code}, {start_date}, {end_date})")
         
         try:
+            # yfinance uses an exclusive `end` boundary. Convert to inclusive semantics
+            # so callers can pass end_date=YYYY-MM-DD and still receive that trading day.
+            fetch_end = (pd.to_datetime(end_date) + pd.Timedelta(days=1)).strftime('%Y-%m-%d')
+
             # 使用 yfinance 下载数据
             df = yf.download(
                 tickers=yf_code,
                 start=start_date,
-                end=end_date,
+                end=fetch_end,
                 progress=False,  # 禁止进度条
                 auto_adjust=True,  # 自动调整价格（复权）
                 multi_level_index=True

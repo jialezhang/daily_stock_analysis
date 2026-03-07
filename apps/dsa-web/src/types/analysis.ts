@@ -49,6 +49,7 @@ export interface ReportStrategy {
 /** 详情区（可折叠） */
 export interface ReportDetails {
   newsContent?: string;
+  technicalModule?: Record<string, unknown>;
   rawResult?: Record<string, unknown>;
   contextSnapshot?: Record<string, unknown>;
 }
@@ -139,6 +140,119 @@ export interface HistoryListResponse {
   page: number;
   limit: number;
   items: HistoryItem[];
+}
+
+export interface HistoryDeleteResponse {
+  deleted: number;
+}
+
+export type HistoryRefreshMode = 'full' | 'partial';
+
+export type HistoryRefreshModule =
+  | 'price_zones'
+  | 'pattern_signals'
+  | 'technical_indicators'
+  | 'sniper_points'
+  | 'summary'
+  | 'news'
+  | 'position_management';
+
+export interface HistoryRefreshRequest {
+  mode: HistoryRefreshMode;
+  modules?: HistoryRefreshModule[];
+}
+
+export interface HistoryRefreshResponse {
+  updated: boolean;
+  recordId: number;
+  mode: HistoryRefreshMode;
+  modules: HistoryRefreshModule[];
+  message: string;
+}
+
+export type HistoryModuleKey = HistoryRefreshModule | 'full';
+
+export interface ModuleRefreshJob {
+  jobId: string;
+  recordId: number;
+  module: HistoryModuleKey;
+  status: 'queued' | 'running' | 'succeeded' | 'failed';
+  message: string;
+  createdAt: string;
+  startedAt?: string;
+  finishedAt?: string;
+  moduleUpdatedAt?: string;
+}
+
+export interface ModuleRefreshStartResponse {
+  accepted: boolean;
+  job: ModuleRefreshJob;
+}
+
+export interface ModuleRefreshJobsResponse {
+  total: number;
+  items: ModuleRefreshJob[];
+}
+
+export type RhinoStrengthLevel = '弱' | '中' | '强' | '超强';
+
+export interface RhinoZoneUpsertRequest {
+  upper: number;
+  lower: number;
+  strengthLevel: RhinoStrengthLevel;
+  name?: string;
+  definition?: string;
+}
+
+export interface RhinoZoneDeleteResponse {
+  deleted: boolean;
+  recordId: number;
+  zoneId: string;
+}
+
+export interface RhinoZoneUpsertResponse {
+  updated: boolean;
+  recordId: number;
+  zone?: Record<string, unknown>;
+  message: string;
+}
+
+export type PositionBaseCurrency = 'USD' | 'CNY' | 'RMB';
+export type PositionQuoteCurrency = 'USD' | 'CNY' | 'RMB' | 'HKD';
+
+export interface PositionManagementTarget {
+  annualReturnTargetPct: number;
+  baseCurrency: PositionBaseCurrency;
+  usdCny: number;
+  usdHkd: number;
+}
+
+export interface PositionHoldingInput {
+  id?: string;
+  marketType: string;
+  assetClass: string;
+  symbol: string;
+  name?: string;
+  quantity: number;
+  avgCost: number;
+  currentPrice: number;
+  previousClose?: number;
+  currency: PositionQuoteCurrency;
+}
+
+export interface PositionManagementUpsertRequest {
+  target: PositionManagementTarget;
+  holdings: PositionHoldingInput[];
+  macroEvents?: string[];
+  notes?: string;
+  refreshBenchmarks?: boolean;
+}
+
+export interface PositionManagementResponse {
+  updated: boolean;
+  recordId: number;
+  module?: Record<string, unknown>;
+  message: string;
 }
 
 /** 新闻情报条目 */

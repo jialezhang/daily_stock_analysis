@@ -190,6 +190,7 @@ class AnalysisResult:
 
     # ========== 元数据 ==========
     market_snapshot: Optional[Dict[str, Any]] = None  # 当日行情快照（展示用）
+    technical_module: Optional[Dict[str, Any]] = None  # deterministic technical module
     raw_response: Optional[str] = None  # 原始响应（调试用）
     search_performed: bool = False  # 是否执行了联网搜索
     data_sources: str = ""  # 数据来源说明
@@ -229,6 +230,7 @@ class AnalysisResult:
             'risk_warning': self.risk_warning,
             'buy_reason': self.buy_reason,
             'market_snapshot': self.market_snapshot,
+            'technical_module': self.technical_module,
             'search_performed': self.search_performed,
             'success': self.success,
             'error_message': self.error_message,
@@ -1254,6 +1256,7 @@ class GeminiAnalyzer:
 | 量能状态 | {trend.get('volume_status', '未知')} | {trend.get('volume_trend', '')} |
 | 系统信号 | {trend.get('buy_signal', '未知')} | |
 | 系统评分 | {trend.get('signal_score', 0)}/100 | |
+| 形态建议 | {trend.get('pattern_advice', '无')} | |
 
 #### 系统分析理由
 **买入理由**：
@@ -1261,8 +1264,101 @@ class GeminiAnalyzer:
 
 **风险因素**：
 {chr(10).join('- ' + r for r in trend.get('risk_factors', ['无'])) if trend.get('risk_factors') else '- 无'}
+
+**止跌形态命中**：
+{chr(10).join('- ' + r for r in trend.get('bottom_pattern_hits', ['无'])) if trend.get('bottom_pattern_hits') else '- 无'}
+
+**见顶形态命中**：
+{chr(10).join('- ' + r for r in trend.get('top_pattern_hits', ['无'])) if trend.get('top_pattern_hits') else '- 无'}
 """
-        
+
+        # Add deterministic technical module for clearer and repeatable output.
+        if 'technical_module' in context and isinstance(context['technical_module'], dict):
+            module = context['technical_module']
+            price = module.get('price_zones', {}) or {}
+            box = price.get('box_ranges', {}) or {}
+            multi_boxes = price.get('multi_boxes', []) or []
+            fib = price.get('fibonacci_levels', {}) or {}
+            trendline = price.get('trendline', {}) or {}
+            signals_block = module.get('pattern_signals_1y', {}) or {}
+            signals = signals_block.get('signals', []) or []
+            indicators = module.get('technical_indicators', {}) or {}
+
+            signal_lines = []
+            for item in signals[-30:]:
+                d = item.get('date', 'N/A')
+                t = item.get('signal_type', 'N/A')
+                p = "、".join(item.get('patterns', [])) if item.get('patterns') else "N/A"
+                signal_lines.append(f"- {d} | {t} | {p}")
+            if not signal_lines:
+                signal_lines = ["- 近一年未命中止跌/见顶组合"]
+
+            fib_lines = [f"- {k}: {v}" for k, v in fib.items()] if fib else ["- 无"]
+            multi_box_lines = [
+                f"- {item.get('name', '箱体')} ({item.get('side', 'N/A')}): "
+                f"{item.get('low', 'N/A')} ~ {item.get('high', 'N/A')} | "
+                f"强度 {item.get('strength_score', 'N/A')} | {item.get('logic', '无')}"
+                for item in multi_boxes[:8]
+            ] if multi_boxes else ["- 无"]
+            indicator_order = indicators.get(
+                "indicator_order",
+                ["rsi", "asr", "cc", "sar", "macd", "kdj", "bias", "kc", "bbiboll", "magic_nine_turn"],
+            )
+
+            def _format_indicator_value(value: Any) -> str:
+                if isinstance(value, dict):
+                    return ", ".join(f"{k}:{v}" for k, v in value.items())
+                return str(value)
+
+            indicator_rows = []
+            for key in indicator_order:
+                item = indicators.get(key, {}) or {}
+                if not item:
+                    continue
+                label = key.upper() if key != "magic_nine_turn" else "神奇九转"
+                indicator_rows.append(
+                    f"| {label} | {_format_indicator_value(item.get('value', 'N/A'))} | "
+                    f"{item.get('score', 'N/A')} | {item.get('result', 'N/A')} |"
+                )
+            if not indicator_rows:
+                indicator_rows = ["| - | - | - | - |"]
+
+            prompt += f"""
+### 技术面增强模块
+
+#### 价格区间（箱体 + 斐波那契 + 趋势线）
+| 维度 | 信息 |
+|------|------|
+| 当前价 | {price.get('current_price', 'N/A')} |
+| 强支撑 | {price.get('strong_support', 'N/A')} |
+| 弱支撑 | {price.get('weak_support', 'N/A')} |
+| 强阻力 | {price.get('strong_resistance', 'N/A')} |
+| 弱阻力 | {price.get('weak_resistance', 'N/A')} |
+| 短箱体(20) | {box.get('short_20', {}).get('low', 'N/A')} ~ {box.get('short_20', {}).get('high', 'N/A')} |
+| 中箱体(60) | {box.get('mid_60', {}).get('low', 'N/A')} ~ {box.get('mid_60', {}).get('high', 'N/A')} |
+| 长箱体(120) | {box.get('long_120', {}).get('low', 'N/A')} ~ {box.get('long_120', {}).get('high', 'N/A')} |
+| 趋势线支撑 | {trendline.get('support', 'N/A')} |
+| 趋势线阻力 | {trendline.get('resistance', 'N/A')} |
+
+斐波那契关键位：
+{chr(10).join(fib_lines)}
+
+多箱体关键区间：
+{chr(10).join(multi_box_lines)}
+
+#### 止跌/见顶信号（近一年）
+- 止跌次数: {signals_block.get('bottom_count', 0)}
+- 见顶次数: {signals_block.get('top_count', 0)}
+- 信号总数: {len(signals)}
+{chr(10).join(signal_lines)}
+
+#### 技术参数评分（含近期解读）
+| 指标 | 数值 | 评分 | 结果 |
+|------|------|------|------|
+{chr(10).join(indicator_rows)}
+| 总分 | - | {indicators.get('overall', {}).get('score', 'N/A')} | {indicators.get('overall', {}).get('result', 'N/A')} |
+"""
+
         # 添加昨日对比数据
         if 'yesterday' in context:
             volume_change = context.get('volume_change_ratio', 'N/A')
@@ -1516,6 +1612,7 @@ class GeminiAnalyzer:
                     risk_warning=data.get('risk_warning', ''),
                     buy_reason=data.get('buy_reason', ''),
                     # 元数据
+                    technical_module=data.get('technical_module'),
                     search_performed=data.get('search_performed', False),
                     data_sources=data.get('data_sources', '技术面数据'),
                     success=True,

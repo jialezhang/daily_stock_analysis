@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from data_provider.realtime_types import UnifiedRealtimeQuote, RealtimeSource
 from src.stock_analyzer import StockTrendAnalyzer, TrendAnalysisResult, TrendStatus
 from src.core.pipeline import StockAnalysisPipeline
+from src.enums import ReportType
 
 
 def _make_realtime_quote(
@@ -223,6 +224,145 @@ class TestEnhanceContextRealtimeOverride(unittest.TestCase):
         )
         self.assertEqual(enhanced["today"]["close"], 15.0)
         self.assertEqual(enhanced["today"]["ma5"], 14.8)
+
+    def test_technical_module_passthrough(self) -> None:
+        """technical_module in context should be preserved for downstream prompt/report rendering."""
+        context = {
+            "code": "600519",
+            "today": {"close": 15.0},
+            "technical_module": {
+                "price_zones": {"strong_support": 14.5},
+                "pattern_signals_1y": {"signals": []},
+                "technical_indicators": {"overall": {"score": 70}},
+            },
+        }
+        enhanced = self.pipeline._enhance_context(context, None, None, None, "贵州茅台")
+        self.assertIn("technical_module", enhanced)
+        self.assertIn("price_zones", enhanced["technical_module"])
+
+
+class TestAnalyzeWithAgentTechnicalModule(unittest.TestCase):
+    """Tests for technical_module population in agent analysis path."""
+
+    def setUp(self) -> None:
+        self._db_path = os.path.join(
+            os.path.dirname(__file__), "..", "data", "test_issue234.db"
+        )
+        os.makedirs(os.path.dirname(self._db_path), exist_ok=True)
+        with patch.dict(os.environ, {"DATABASE_PATH": self._db_path}):
+            from src.config import Config
+            Config._instance = None
+            self.config = Config._load_from_env()
+        self.pipeline = StockAnalysisPipeline(config=self.config)
+
+    def test_agent_path_populates_technical_module(self) -> None:
+        """Agent analysis result should include deterministic technical_module."""
+        class _Bar:
+            def __init__(self, payload):
+                self._payload = payload
+
+            def to_dict(self):
+                return self._payload
+
+        df = _make_historical_df(days=120)
+        bars = [_Bar(row) for row in df.to_dict(orient="records")]
+        self.pipeline.db.get_data_range = MagicMock(return_value=bars)
+        self.pipeline.db.save_analysis_history = MagicMock(return_value=1)
+        self.pipeline.search_service = MagicMock()
+        self.pipeline.search_service.is_available = False
+        self.pipeline.trend_analyzer.build_technical_module = MagicMock(
+            return_value={"price_zones": {"strong_support": 100.0}}
+        )
+
+        executor = MagicMock()
+        executor.run.return_value = MagicMock(
+            success=True,
+            provider="openai",
+            error=None,
+            dashboard={
+                "sentiment_score": 55,
+                "trend_prediction": "震荡",
+                "operation_advice": "观望",
+                "analysis_summary": "test",
+            },
+        )
+
+        with patch("src.agent.factory.build_agent_executor", return_value=executor):
+            result = self.pipeline._analyze_with_agent(
+                code="600519",
+                report_type=ReportType.FULL,
+                query_id="qid-agent-tech-module",
+                stock_name="贵州茅台",
+                realtime_quote=None,
+                chip_data=None,
+            )
+
+        self.assertIsNotNone(result)
+        self.assertIsNotNone(result.technical_module)
+        self.assertIn("price_zones", result.technical_module)
+
+
+class TestFetchAndSaveStockDataBackfill(unittest.TestCase):
+    """Tests for backfilling long history when technical-module bars are insufficient."""
+
+    def setUp(self) -> None:
+        self._db_path = os.path.join(
+            os.path.dirname(__file__), "..", "data", "test_issue234.db"
+        )
+        os.makedirs(os.path.dirname(self._db_path), exist_ok=True)
+        with patch.dict(os.environ, {"DATABASE_PATH": self._db_path}):
+            from src.config import Config
+            Config._instance = None
+            self.config = Config._load_from_env()
+        self.pipeline = StockAnalysisPipeline(config=self.config)
+
+    def test_backfills_when_today_exists_but_history_insufficient(self) -> None:
+        """If only short history exists, fetch_and_save_stock_data should trigger a backfill fetch."""
+        self.pipeline.db.has_today_data = MagicMock(return_value=True)
+        self.pipeline.db.get_data_range = MagicMock(return_value=[object()] * 42)
+        self.pipeline.db.save_daily_data = MagicMock(return_value=42)
+        self.pipeline.fetcher_manager.get_daily_data = MagicMock(
+            return_value=(
+                pd.DataFrame(
+                    [
+                        {
+                            "date": date.today(),
+                            "open": 1.0,
+                            "high": 1.0,
+                            "low": 1.0,
+                            "close": 1.0,
+                            "volume": 1.0,
+                            "amount": 1.0,
+                            "pct_chg": 0.0,
+                        }
+                    ]
+                ),
+                "MockFetcher",
+            )
+        )
+
+        ok, err = self.pipeline.fetch_and_save_stock_data("NVDA", force_refresh=False)
+
+        self.assertTrue(ok)
+        self.assertIsNone(err)
+        self.pipeline.db.get_data_range.assert_called_once()
+        self.pipeline.fetcher_manager.get_daily_data.assert_called_once()
+        self.pipeline.db.save_daily_data.assert_called_once()
+
+    def test_skip_fetch_when_today_exists_and_history_sufficient(self) -> None:
+        """If history is sufficient, should skip network fetch when today's data already exists."""
+        self.pipeline.db.has_today_data = MagicMock(return_value=True)
+        self.pipeline.db.get_data_range = MagicMock(return_value=[object()] * 260)
+        self.pipeline.db.save_daily_data = MagicMock(return_value=0)
+        self.pipeline.fetcher_manager.get_daily_data = MagicMock()
+
+        ok, err = self.pipeline.fetch_and_save_stock_data("MSFT", force_refresh=False)
+
+        self.assertTrue(ok)
+        self.assertIsNone(err)
+        self.pipeline.db.get_data_range.assert_called_once()
+        self.pipeline.fetcher_manager.get_daily_data.assert_not_called()
+        self.pipeline.db.save_daily_data.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -888,6 +888,105 @@ class DatabaseManager:
                 select(AnalysisHistory).where(AnalysisHistory.id == record_id)
             ).scalars().first()
             return result
+
+    def update_analysis_history_by_id(self, record_id: int, updates: Dict[str, Any]) -> int:
+        """
+        Update one analysis history record by primary key ID.
+
+        Args:
+            record_id: Analysis history primary key ID.
+            updates: Partial field map to update.
+
+        Returns:
+            Number of updated rows (0 or 1).
+        """
+        allowed_fields = {
+            "query_id",
+            "code",
+            "name",
+            "report_type",
+            "sentiment_score",
+            "operation_advice",
+            "trend_prediction",
+            "analysis_summary",
+            "raw_result",
+            "news_content",
+            "context_snapshot",
+            "ideal_buy",
+            "secondary_buy",
+            "stop_loss",
+            "take_profit",
+        }
+        safe_updates = {k: v for k, v in (updates or {}).items() if k in allowed_fields}
+        if not safe_updates:
+            return 0
+
+        with self.get_session() as session:
+            try:
+                record = session.execute(
+                    select(AnalysisHistory).where(AnalysisHistory.id == record_id)
+                ).scalars().first()
+                if record is None:
+                    return 0
+
+                for key, value in safe_updates.items():
+                    setattr(record, key, value)
+
+                session.commit()
+                return 1
+            except Exception as e:
+                session.rollback()
+                logger.error(f"更新历史记录失败: {e}")
+                return 0
+
+    def delete_analysis_history_by_id(self, record_id: int) -> int:
+        """
+        Delete one analysis history record by primary key ID.
+
+        Returns:
+            Number of deleted analysis_history rows (0 or 1).
+        """
+        with self.get_session() as session:
+            try:
+                record = session.execute(
+                    select(AnalysisHistory).where(AnalysisHistory.id == record_id)
+                ).scalars().first()
+                if record is None:
+                    return 0
+
+                session.execute(
+                    delete(BacktestResult).where(BacktestResult.analysis_history_id == record_id)
+                )
+
+                exists_same_query_code = session.execute(
+                    select(AnalysisHistory.id).where(
+                        and_(
+                            AnalysisHistory.query_id == record.query_id,
+                            AnalysisHistory.code == record.code,
+                            AnalysisHistory.id != record_id,
+                        )
+                    ).limit(1)
+                ).scalars().first()
+
+                if not exists_same_query_code:
+                    session.execute(
+                        delete(NewsIntel).where(
+                            and_(
+                                NewsIntel.query_id == record.query_id,
+                                NewsIntel.code == record.code,
+                            )
+                        )
+                    )
+
+                result = session.execute(
+                    delete(AnalysisHistory).where(AnalysisHistory.id == record_id)
+                )
+                session.commit()
+                return int(result.rowcount or 0)
+            except Exception as e:
+                session.rollback()
+                logger.error(f"删除历史记录失败: {e}")
+                return 0
     
     def get_data_range(
         self, 

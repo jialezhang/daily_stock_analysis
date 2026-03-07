@@ -46,6 +46,8 @@ class StockAnalysisPipeline:
     2. 协调数据获取、存储、搜索、分析、通知等模块
     3. 实现并发控制和异常处理
     """
+    TECH_MODULE_CALENDAR_DAYS = 420
+    TECH_MODULE_MIN_BARS = 180
     
     def __init__(
         self,
@@ -127,15 +129,37 @@ class StockAnalysisPipeline:
         """
         try:
             today = date.today()
-            
-            # 断点续传检查：如果今日数据已存在，跳过
-            if not force_refresh and self.db.has_today_data(code, today):
-                logger.info(f"[{code}] 今日数据已存在，跳过获取（断点续传）")
+
+            has_today = self.db.has_today_data(code, today)
+            history_bars = self._get_technical_history_bars_count(code, end_date=today)
+            history_sufficient = history_bars >= self.TECH_MODULE_MIN_BARS
+
+            # 断点续传检查：今日数据存在且技术模块历史足够时直接跳过
+            if not force_refresh and has_today and history_sufficient:
+                logger.info(
+                    f"[{code}] 今日数据已存在且历史完整（{history_bars} bars），跳过获取（断点续传）"
+                )
                 return True, None
-            
-            # 从数据源获取数据
-            logger.info(f"[{code}] 开始从数据源获取数据...")
-            df, source_name = self.fetcher_manager.get_daily_data(code, days=30)
+
+            # Decide fetch window:
+            # - If technical history is insufficient or force refresh, fetch a long window for full signal scan.
+            # - Otherwise keep the short incremental fetch for speed.
+            fetch_long_window = force_refresh or (not history_sufficient)
+            if fetch_long_window:
+                start_date = (today - timedelta(days=self.TECH_MODULE_CALENDAR_DAYS)).isoformat()
+                end_date = today.isoformat()
+                logger.info(
+                    f"[{code}] 历史数据不足（{history_bars} bars），回源补齐技术面窗口: {start_date} ~ {end_date}"
+                )
+                df, source_name = self.fetcher_manager.get_daily_data(
+                    code,
+                    start_date=start_date,
+                    end_date=end_date,
+                    days=self.TECH_MODULE_CALENDAR_DAYS,
+                )
+            else:
+                logger.info(f"[{code}] 开始从数据源增量获取数据...")
+                df, source_name = self.fetcher_manager.get_daily_data(code, days=30)
             
             if df is None or df.empty:
                 return False, "获取数据为空"
@@ -150,6 +174,19 @@ class StockAnalysisPipeline:
             error_msg = f"获取/保存数据失败: {str(e)}"
             logger.error(f"[{code}] {error_msg}")
             return False, error_msg
+
+    def _get_technical_history_bars_count(self, code: str, end_date: Optional[date] = None) -> int:
+        """
+        Return bar count in the technical-module window from local DB.
+        """
+        try:
+            final_date = end_date or date.today()
+            start_date = final_date - timedelta(days=self.TECH_MODULE_CALENDAR_DAYS)
+            bars = self.db.get_data_range(code, start_date, final_date)
+            return len(bars) if bars else 0
+        except Exception as e:
+            logger.warning(f"[{code}] 技术面历史完整性检查失败: {e}")
+            return 0
     
     def analyze_stock(self, code: str, report_type: ReportType, query_id: str) -> Optional[AnalysisResult]:
         """
@@ -225,9 +262,10 @@ class StockAnalysisPipeline:
             
             # Step 3: 趋势分析（基于交易理念）
             trend_result: Optional[TrendAnalysisResult] = None
+            technical_module: Optional[Dict[str, Any]] = None
             try:
                 end_date = date.today()
-                start_date = end_date - timedelta(days=89)  # ~60 trading days for MA60
+                start_date = end_date - timedelta(days=420)  # ~1y for technical module + MA/indicator warmup
                 historical_bars = self.db.get_data_range(code, start_date, end_date)
                 if historical_bars:
                     df = pd.DataFrame([bar.to_dict() for bar in historical_bars])
@@ -235,6 +273,7 @@ class StockAnalysisPipeline:
                     if self.config.enable_realtime_quote and realtime_quote:
                         df = self._augment_historical_with_realtime(df, realtime_quote, code)
                     trend_result = self.trend_analyzer.analyze(df, code)
+                    technical_module = self.trend_analyzer.build_technical_module(df, code)
                     logger.info(f"[{code}] 趋势分析: {trend_result.trend_status.value}, "
                               f"买入信号={trend_result.buy_signal.value}, 评分={trend_result.signal_score}")
             except Exception as e:
@@ -292,6 +331,9 @@ class StockAnalysisPipeline:
                     'today': {},
                     'yesterday': {}
                 }
+
+            if technical_module:
+                context['technical_module'] = technical_module
             
             # Step 6: 增强上下文数据（添加实时行情、筹码、趋势分析结果、股票名称）
             enhanced_context = self._enhance_context(
@@ -310,6 +352,7 @@ class StockAnalysisPipeline:
                 realtime_data = enhanced_context.get('realtime', {})
                 result.current_price = realtime_data.get('price')
                 result.change_pct = realtime_data.get('change_pct')
+                result.technical_module = technical_module
 
             # Step 8: 保存分析历史记录
             if result:
@@ -415,7 +458,15 @@ class StockAnalysisPipeline:
                 'signal_score': trend_result.signal_score,
                 'signal_reasons': trend_result.signal_reasons,
                 'risk_factors': trend_result.risk_factors,
+                'bottom_pattern_hits': trend_result.bottom_pattern_hits,
+                'top_pattern_hits': trend_result.top_pattern_hits,
+                'pattern_advice': trend_result.pattern_advice,
             }
+
+        # Add deterministic technical module (price zones / yearly pattern signals / indicator scores)
+        technical_module = context.get('technical_module')
+        if technical_module:
+            enhanced['technical_module'] = technical_module
 
         # Issue #234: Override today with realtime OHLC + trend MA for intraday analysis
         # Guard: trend_result.ma5 > 0 ensures MA calculation succeeded (data sufficient)
@@ -517,12 +568,29 @@ class StockAnalysisPipeline:
             if chip_data:
                 initial_context["chip_distribution"] = self._safe_to_dict(chip_data)
 
+            technical_module: Optional[Dict[str, Any]] = None
+            try:
+                end_date = date.today()
+                start_date = end_date - timedelta(days=420)  # ~1y + indicator warmup
+                historical_bars = self.db.get_data_range(code, start_date, end_date)
+                if historical_bars:
+                    df = pd.DataFrame([bar.to_dict() for bar in historical_bars])
+                    if self.config.enable_realtime_quote and realtime_quote:
+                        df = self._augment_historical_with_realtime(df, realtime_quote, code)
+                    technical_module = self.trend_analyzer.build_technical_module(df, code)
+                    if technical_module:
+                        initial_context["technical_module"] = technical_module
+            except Exception as e:
+                logger.warning(f"[{code}] Agent 模式技术面模块构建失败: {e}")
+
             # 运行 Agent
             message = f"请分析股票 {code} ({stock_name})，并生成决策仪表盘报告。"
             agent_result = executor.run(message, context=initial_context)
 
             # 转换为 AnalysisResult
             result = self._agent_result_to_analysis_result(agent_result, code, stock_name, report_type, query_id)
+            if result:
+                result.technical_module = technical_module
 
             # 保存新闻情报到数据库（Agent 工具结果仅用于 LLM 上下文，未持久化，Fixes #396）
             # 使用 search_stock_news（与 Agent 工具调用逻辑一致），仅 1 次 API 调用，无额外延迟

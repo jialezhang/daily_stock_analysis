@@ -3,16 +3,28 @@ import { useState, useEffect, useCallback } from 'react';
 import { Card } from '../common';
 import { historyApi } from '../../api/history';
 import type { NewsIntelItem } from '../../types/analysis';
+import type { ModuleRefreshState } from '../../utils/moduleRefresh';
 
 interface ReportNewsProps {
   recordId?: number;  // 分析历史记录主键 ID
   limit?: number;
+  onRefreshModule?: () => void;
+  isRefreshing?: boolean;
+  refreshState?: ModuleRefreshState;
+  updatedAt?: string | null;
 }
 
 /**
  * 资讯区组件 - 终端风格
  */
-export const ReportNews: React.FC<ReportNewsProps> = ({ recordId, limit = 20 }) => {
+export const ReportNews: React.FC<ReportNewsProps> = ({
+  recordId,
+  limit = 20,
+  onRefreshModule,
+  isRefreshing = false,
+  refreshState = 'idle',
+  updatedAt,
+}) => {
   const [isLoading, setIsLoading] = useState(false);
   const [items, setItems] = useState<NewsIntelItem[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -41,6 +53,20 @@ export const ReportNews: React.FC<ReportNewsProps> = ({ recordId, limit = 20 }) 
     }
   }, [recordId, fetchNews]);
 
+  useEffect(() => {
+    if (!recordId || !updatedAt) return;
+    fetchNews(false);
+  }, [recordId, updatedAt, fetchNews]);
+  const refreshText = refreshState === 'queued'
+    ? '排队中...'
+    : refreshState === 'running'
+      ? '更新中...'
+      : refreshState === 'succeeded'
+        ? '已更新'
+        : refreshState === 'failed'
+          ? '重试更新'
+          : '更新';
+
   if (!recordId) {
     return null;
   }
@@ -51,17 +77,25 @@ export const ReportNews: React.FC<ReportNewsProps> = ({ recordId, limit = 20 }) 
         <div className="mb-3 flex items-baseline gap-2">
           <span className="label-uppercase">NEWS FEED</span>
           <h3 className="text-base font-semibold text-white">相关资讯</h3>
+          <span className="text-[11px] text-muted">更新于 {updatedAt || '未更新'}</span>
         </div>
         <div className="flex items-center gap-2">
-          {isLoading && (
+          {(isLoading || isRefreshing) && (
             <div className="w-3.5 h-3.5 border-2 border-cyan/20 border-t-cyan rounded-full animate-spin" />
           )}
           <button
             type="button"
-            onClick={() => fetchNews(true)}
+            onClick={() => {
+              if (onRefreshModule) {
+                onRefreshModule();
+              } else {
+                fetchNews(true);
+              }
+            }}
             className="text-xs text-cyan hover:text-white transition-colors"
+            disabled={isRefreshing}
           >
-            刷新
+            {refreshText}
           </button>
         </div>
       </div>

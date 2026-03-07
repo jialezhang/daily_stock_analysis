@@ -70,6 +70,9 @@ def _handle_analyze_trend(stock_code: str) -> dict:
         "signal_score": result.signal_score,
         "signal_reasons": result.signal_reasons,
         "risk_factors": result.risk_factors,
+        "bottom_pattern_hits": result.bottom_pattern_hits,
+        "top_pattern_hits": result.top_pattern_hits,
+        "pattern_advice": result.pattern_advice,
     }
 
 

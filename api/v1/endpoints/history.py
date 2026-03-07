@@ -10,7 +10,11 @@
 """
 
 import logging
-from typing import Optional
+import threading
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from typing import Optional, Dict, Any, List
 
 from fastapi import APIRouter, HTTPException, Query, Depends
 
@@ -18,6 +22,18 @@ from api.deps import get_database_manager
 from api.v1.schemas.history import (
     HistoryListResponse,
     HistoryItem,
+    HistoryDeleteResponse,
+    HistoryRefreshRequest,
+    HistoryRefreshResponse,
+    RhinoZoneUpsertRequest,
+    RhinoZoneUpdateRequest,
+    RhinoZoneUpsertResponse,
+    RhinoZoneDeleteResponse,
+    PositionManagementUpsertRequest,
+    PositionManagementResponse,
+    ModuleRefreshJob,
+    ModuleRefreshStartResponse,
+    ModuleRefreshJobsResponse,
     NewsIntelItem,
     NewsIntelResponse,
     AnalysisReport,
@@ -33,6 +49,75 @@ from src.services.history_service import HistoryService
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+_MODULE_REFRESH_ALLOWED = {
+    "full",
+    "price_zones",
+    "pattern_signals",
+    "technical_indicators",
+    "sniper_points",
+    "summary",
+    "news",
+    "position_management",
+}
+_MODULE_REFRESH_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="history-module-refresh")
+_MODULE_REFRESH_LOCK = threading.Lock()
+_MODULE_REFRESH_JOBS: Dict[str, Dict[str, Any]] = {}
+
+
+def _now_iso() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def _build_job_payload(job: Dict[str, Any]) -> ModuleRefreshJob:
+    return ModuleRefreshJob(
+        job_id=str(job.get("job_id", "")),
+        record_id=int(job.get("record_id", 0)),
+        module=str(job.get("module", "")),
+        status=str(job.get("status", "queued")),
+        message=str(job.get("message", "")),
+        created_at=str(job.get("created_at", "")),
+        started_at=job.get("started_at"),
+        finished_at=job.get("finished_at"),
+        module_updated_at=job.get("module_updated_at"),
+    )
+
+
+def _run_module_refresh_job(job_id: str) -> None:
+    with _MODULE_REFRESH_LOCK:
+        job = _MODULE_REFRESH_JOBS.get(job_id)
+        if not job:
+            return
+        job["status"] = "running"
+        job["started_at"] = _now_iso()
+        job["message"] = "任务执行中"
+        record_id = int(job["record_id"])
+        module = str(job["module"])
+
+    try:
+        service = HistoryService(DatabaseManager.get_instance())
+        if module == "full":
+            result = service.refresh_history_record(record_id=record_id, mode="full", modules=[])
+        else:
+            result = service.refresh_history_record(record_id=record_id, mode="partial", modules=[module])
+        success = bool(result.get("updated"))
+        updated_at = service.get_module_last_updated_at(record_id=record_id, module=module if module != "full" else "summary")
+        with _MODULE_REFRESH_LOCK:
+            job = _MODULE_REFRESH_JOBS.get(job_id)
+            if not job:
+                return
+            job["status"] = "succeeded" if success else "failed"
+            job["finished_at"] = _now_iso()
+            job["message"] = str(result.get("message", "完成"))
+            job["module_updated_at"] = updated_at
+    except Exception as e:
+        logger.error(f"模块刷新任务失败: {e}", exc_info=True)
+        with _MODULE_REFRESH_LOCK:
+            job = _MODULE_REFRESH_JOBS.get(job_id)
+            if not job:
+                return
+            job["status"] = "failed"
+            job["finished_at"] = _now_iso()
+            job["message"] = f"任务失败: {str(e)}"
 
 
 @router.get(
@@ -206,6 +291,11 @@ def get_history_detail(
         
         details = ReportDetails(
             news_content=result.get("news_content"),
+            technical_module=(
+                (result.get("raw_result") or {}).get("technical_module")
+                if isinstance(result.get("raw_result"), dict)
+                else None
+            ),
             raw_result=result.get("raw_result"),
             context_snapshot=result.get("context_snapshot")
         )
@@ -226,6 +316,47 @@ def get_history_detail(
             detail={
                 "error": "internal_error",
                 "message": f"查询历史详情失败: {str(e)}"
+            }
+        )
+
+
+@router.delete(
+    "/{record_id}",
+    response_model=HistoryDeleteResponse,
+    responses={
+        200: {"description": "删除成功"},
+        404: {"description": "报告不存在", "model": ErrorResponse},
+        500: {"description": "服务器错误", "model": ErrorResponse},
+    },
+    summary="删除历史记录",
+    description="根据分析历史记录 ID 删除单条历史记录"
+)
+def delete_history_record(
+    record_id: int,
+    db_manager: DatabaseManager = Depends(get_database_manager)
+) -> HistoryDeleteResponse:
+    """Delete one analysis history record by ID."""
+    try:
+        service = HistoryService(db_manager)
+        deleted = service.delete_history_record(record_id)
+        if deleted <= 0:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "error": "not_found",
+                    "message": f"未找到 id={record_id} 的分析记录"
+                }
+            )
+        return HistoryDeleteResponse(deleted=deleted)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"删除历史记录失败: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "internal_error",
+                "message": f"删除历史记录失败: {str(e)}"
             }
         )
 
@@ -290,4 +421,361 @@ def get_history_news(
                 "error": "internal_error",
                 "message": f"查询新闻情报失败: {str(e)}"
             }
+        )
+
+
+@router.get(
+    "/{record_id}/position-management",
+    response_model=PositionManagementResponse,
+    responses={
+        200: {"description": "仓位管理模块"},
+        404: {"description": "报告不存在", "model": ErrorResponse},
+        500: {"description": "服务器错误", "model": ErrorResponse},
+    },
+    summary="获取仓位管理模块",
+)
+def get_position_management_module(
+    record_id: int,
+    db_manager: DatabaseManager = Depends(get_database_manager),
+) -> PositionManagementResponse:
+    """Get position management module for one history record."""
+    try:
+        service = HistoryService(db_manager)
+        result = service.get_position_management(record_id=record_id)
+        if not result.get("updated") and "未找到" in str(result.get("message", "")):
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "not_found", "message": result.get("message", f"未找到 id={record_id} 的分析记录")},
+            )
+        return PositionManagementResponse(
+            updated=bool(result.get("updated")),
+            record_id=record_id,
+            module=result.get("module"),
+            message=str(result.get("message", "")),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取仓位管理模块失败: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "internal_error", "message": f"获取仓位管理模块失败: {str(e)}"},
+        )
+
+
+@router.put(
+    "/{record_id}/position-management",
+    response_model=PositionManagementResponse,
+    responses={
+        200: {"description": "保存成功"},
+        404: {"description": "报告不存在", "model": ErrorResponse},
+        500: {"description": "服务器错误", "model": ErrorResponse},
+    },
+    summary="保存仓位管理模块",
+)
+def upsert_position_management_module(
+    record_id: int,
+    request: PositionManagementUpsertRequest,
+    db_manager: DatabaseManager = Depends(get_database_manager),
+) -> PositionManagementResponse:
+    """Upsert position management module for one history record."""
+    try:
+        service = HistoryService(db_manager)
+        result = service.upsert_position_management(
+            record_id=record_id,
+            target=request.target.model_dump(),
+            holdings=[item.model_dump() for item in request.holdings],
+            macro_events=request.macro_events,
+            notes=request.notes,
+            refresh_benchmarks=request.refresh_benchmarks,
+        )
+        if not result.get("updated") and "未找到" in str(result.get("message", "")):
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "not_found", "message": result.get("message", f"未找到 id={record_id} 的分析记录")},
+            )
+        return PositionManagementResponse(
+            updated=bool(result.get("updated")),
+            record_id=record_id,
+            module=result.get("module"),
+            message=str(result.get("message", "")),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"保存仓位管理模块失败: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "internal_error", "message": f"保存仓位管理模块失败: {str(e)}"},
+        )
+
+
+@router.post(
+    "/{record_id}/refresh",
+    response_model=HistoryRefreshResponse,
+    responses={
+        200: {"description": "刷新完成"},
+        404: {"description": "报告不存在", "model": ErrorResponse},
+        500: {"description": "服务器错误", "model": ErrorResponse},
+    },
+    summary="刷新单条历史报告数据",
+    description=(
+        "支持 full/partial 两种模式。full 会刷新整条分析数据但保留 Rhino 价格区间；"
+        "partial 仅刷新指定子模块。"
+    ),
+)
+def refresh_history_record(
+    record_id: int,
+    request: HistoryRefreshRequest,
+    db_manager: DatabaseManager = Depends(get_database_manager),
+) -> HistoryRefreshResponse:
+    """Refresh one history record with module-aware behavior."""
+    try:
+        service = HistoryService(db_manager)
+        result = service.refresh_history_record(
+            record_id=record_id,
+            mode=request.mode,
+            modules=request.modules,
+        )
+        if not result.get("updated") and "未找到" in str(result.get("message", "")):
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "error": "not_found",
+                    "message": result.get("message", f"未找到 id={record_id} 的分析记录"),
+                },
+            )
+        return HistoryRefreshResponse(
+            updated=bool(result.get("updated")),
+            record_id=record_id,
+            mode=str(result.get("mode", request.mode)),
+            modules=list(result.get("modules", [])),
+            message=str(result.get("message", "")),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"刷新历史记录失败: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "internal_error",
+                "message": f"刷新历史记录失败: {str(e)}",
+            },
+        )
+
+
+@router.post(
+    "/{record_id}/modules/{module}/refresh",
+    response_model=ModuleRefreshStartResponse,
+    responses={
+        200: {"description": "任务已接受"},
+        400: {"description": "参数错误", "model": ErrorResponse},
+        500: {"description": "服务器错误", "model": ErrorResponse},
+    },
+    summary="异步刷新单模块/全量",
+    description="异步启动历史报告刷新任务，支持按模块刷新或 full 全量刷新。",
+)
+def start_module_refresh(
+    record_id: int,
+    module: str,
+) -> ModuleRefreshStartResponse:
+    """Start async refresh job for one module or full report."""
+    module_key = str(module or "").strip().lower()
+    if module_key not in _MODULE_REFRESH_ALLOWED:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "invalid_module",
+                "message": f"不支持的模块: {module}",
+            },
+        )
+
+    with _MODULE_REFRESH_LOCK:
+        for job in _MODULE_REFRESH_JOBS.values():
+            if (
+                int(job.get("record_id", -1)) == record_id
+                and str(job.get("module", "")) == module_key
+                and str(job.get("status", "")) in {"queued", "running"}
+            ):
+                return ModuleRefreshStartResponse(
+                    accepted=True,
+                    job=_build_job_payload(job),
+                )
+
+        job_id = uuid.uuid4().hex
+        job = {
+            "job_id": job_id,
+            "record_id": record_id,
+            "module": module_key,
+            "status": "queued",
+            "message": "任务已入队",
+            "created_at": _now_iso(),
+            "started_at": None,
+            "finished_at": None,
+            "module_updated_at": None,
+        }
+        _MODULE_REFRESH_JOBS[job_id] = job
+
+    _MODULE_REFRESH_EXECUTOR.submit(_run_module_refresh_job, job_id)
+    return ModuleRefreshStartResponse(accepted=True, job=_build_job_payload(job))
+
+
+@router.get(
+    "/{record_id}/modules/refresh-jobs",
+    response_model=ModuleRefreshJobsResponse,
+    responses={
+        200: {"description": "任务列表"},
+    },
+    summary="查询模块刷新任务状态",
+)
+def get_module_refresh_jobs(
+    record_id: int,
+    limit: int = Query(20, ge=1, le=100, description="最多返回任务数"),
+) -> ModuleRefreshJobsResponse:
+    """Get module refresh jobs for one record."""
+    with _MODULE_REFRESH_LOCK:
+        jobs: List[Dict[str, Any]] = [
+            item for item in _MODULE_REFRESH_JOBS.values() if int(item.get("record_id", -1)) == record_id
+        ]
+    jobs.sort(key=lambda x: str(x.get("created_at", "")), reverse=True)
+    jobs = jobs[:limit]
+    return ModuleRefreshJobsResponse(
+        total=len(jobs),
+        items=[_build_job_payload(j) for j in jobs],
+    )
+
+
+@router.post(
+    "/{record_id}/rhino-zones",
+    response_model=RhinoZoneUpsertResponse,
+    responses={
+        200: {"description": "写入成功"},
+        404: {"description": "报告不存在", "model": ErrorResponse},
+        500: {"description": "服务器错误", "model": ErrorResponse},
+    },
+    summary="手动新增 Rhino 价格区间",
+)
+def add_manual_rhino_zone(
+    record_id: int,
+    request: RhinoZoneUpsertRequest,
+    db_manager: DatabaseManager = Depends(get_database_manager),
+) -> RhinoZoneUpsertResponse:
+    """Add one manual rhino zone and persist to history record."""
+    try:
+        service = HistoryService(db_manager)
+        result = service.upsert_manual_rhino_zone(
+            record_id=record_id,
+            upper=request.upper,
+            lower=request.lower,
+            strength_level=request.strength_level,
+            name=request.name,
+            definition=request.definition,
+        )
+        if not result.get("updated") and "未找到" in str(result.get("message", "")):
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "not_found", "message": result.get("message", f"未找到 id={record_id} 的分析记录")},
+            )
+        return RhinoZoneUpsertResponse(
+            updated=bool(result.get("updated")),
+            record_id=record_id,
+            zone=result.get("zone"),
+            message=str(result.get("message", "")),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"新增 Rhino 区间失败: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "internal_error", "message": f"新增 Rhino 区间失败: {str(e)}"},
+        )
+
+
+@router.put(
+    "/{record_id}/rhino-zones/{zone_id}",
+    response_model=RhinoZoneUpsertResponse,
+    responses={
+        200: {"description": "更新成功"},
+        404: {"description": "报告不存在", "model": ErrorResponse},
+        500: {"description": "服务器错误", "model": ErrorResponse},
+    },
+    summary="修改手动 Rhino 价格区间",
+)
+def update_manual_rhino_zone(
+    record_id: int,
+    zone_id: str,
+    request: RhinoZoneUpdateRequest,
+    db_manager: DatabaseManager = Depends(get_database_manager),
+) -> RhinoZoneUpsertResponse:
+    """Update one manual rhino zone and persist to history record."""
+    try:
+        service = HistoryService(db_manager)
+        result = service.update_manual_rhino_zone(
+            record_id=record_id,
+            zone_id=zone_id,
+            upper=request.upper,
+            lower=request.lower,
+            strength_level=request.strength_level,
+            name=request.name,
+            definition=request.definition,
+        )
+        if not result.get("updated") and "未找到 id=" in str(result.get("message", "")):
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "not_found", "message": result.get("message", f"未找到 id={record_id} 的分析记录")},
+            )
+        return RhinoZoneUpsertResponse(
+            updated=bool(result.get("updated")),
+            record_id=record_id,
+            zone=result.get("zone"),
+            message=str(result.get("message", "")),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"修改 Rhino 区间失败: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "internal_error", "message": f"修改 Rhino 区间失败: {str(e)}"},
+        )
+
+
+@router.delete(
+    "/{record_id}/rhino-zones/{zone_id}",
+    response_model=RhinoZoneDeleteResponse,
+    responses={
+        200: {"description": "删除成功"},
+        404: {"description": "报告不存在", "model": ErrorResponse},
+        500: {"description": "服务器错误", "model": ErrorResponse},
+    },
+    summary="删除手动 Rhino 价格区间",
+)
+def delete_manual_rhino_zone(
+    record_id: int,
+    zone_id: str,
+    db_manager: DatabaseManager = Depends(get_database_manager),
+) -> RhinoZoneDeleteResponse:
+    """Delete one manual rhino zone by ID."""
+    try:
+        service = HistoryService(db_manager)
+        result = service.delete_manual_rhino_zone(record_id=record_id, zone_id=zone_id)
+        if not result.get("deleted") and "未找到 id=" in str(result.get("message", "")):
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "not_found", "message": result.get("message", f"未找到 id={record_id} 的分析记录")},
+            )
+        return RhinoZoneDeleteResponse(
+            deleted=bool(result.get("deleted")),
+            record_id=record_id,
+            zone_id=zone_id,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"删除 Rhino 区间失败: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "internal_error", "message": f"删除 Rhino 区间失败: {str(e)}"},
         )
