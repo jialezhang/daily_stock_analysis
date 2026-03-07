@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { agentApi } from '../api/agent';
@@ -30,12 +30,21 @@ interface ProgressStep {
 }
 
 interface FollowUpContext {
-  stock_code: string;
-  stock_name: string | null;
+  stock_code?: string;
+  stock_name?: string | null;
   previous_analysis_summary?: unknown;
   previous_strategy?: unknown;
   previous_price?: number;
   previous_change_pct?: number;
+  report_type?: string;
+  context_title?: string;
+  review_date?: string;
+  generated_at?: string;
+  portfolio_snapshot?: Record<string, unknown>;
+  portfolio_target?: Record<string, unknown>;
+  portfolio_holdings?: Record<string, unknown>[];
+  market_summary?: Record<string, unknown>[] | string[];
+  portfolio_review_report?: string;
 }
 
 interface ChatStreamPayload {
@@ -43,6 +52,18 @@ interface ChatStreamPayload {
   session_id?: string;
   skills?: string[];
   context?: FollowUpContext;
+}
+
+interface ChatSeedState {
+  initialMessage?: string;
+  context?: FollowUpContext;
+  resetSession?: boolean;
+  contextLabel?: string;
+  persistContext?: boolean;
+}
+
+interface ChatNavigationState {
+  chatSeed?: ChatSeedState;
 }
 
 // Quick question examples shown on empty state
@@ -56,6 +77,8 @@ const QUICK_QUESTIONS = [
 ];
 
 const ChatPage: React.FC = () => {
+  const location = useLocation();
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
@@ -80,6 +103,9 @@ const ChatPage: React.FC = () => {
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [activeContextLabel, setActiveContextLabel] = useState<string | null>(null);
+  const followUpContextRef = useRef<FollowUpContext | null>(null);
+  const persistFollowUpContextRef = useRef(false);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -140,6 +166,9 @@ const ChatPage: React.FC = () => {
     setMessages([]);
     setSessionId(targetSessionId);
     sessionIdRef.current = targetSessionId;
+    followUpContextRef.current = null;
+    persistFollowUpContextRef.current = false;
+    setActiveContextLabel(null);
     setSidebarOpen(false);
     agentApi.getChatSessionMessages(targetSessionId).then((msgs) => {
       setMessages(msgs.map((m) => ({ id: m.id, role: m.role, content: m.content })));
@@ -154,6 +183,8 @@ const ChatPage: React.FC = () => {
     setMessages([]);
     setProgressSteps([]);
     followUpContextRef.current = null;
+    persistFollowUpContextRef.current = false;
+    setActiveContextLabel(null);
     setSidebarOpen(false);
   }, []);
 
@@ -166,6 +197,29 @@ const ChatPage: React.FC = () => {
     }).catch(() => {});
     setDeleteConfirmId(null);
   }, [deleteConfirmId, sessionId, startNewChat]);
+
+  // Handle chat seed passed by route state, used by portfolio review Q&A entry.
+  useEffect(() => {
+    const navigationState = (location.state || null) as ChatNavigationState | null;
+    const chatSeed = navigationState?.chatSeed;
+    if (!chatSeed) return;
+
+    if (chatSeed.resetSession) {
+      const newId = generateUUID();
+      setSessionId(newId);
+      sessionIdRef.current = newId;
+      setMessages([]);
+      setProgressSteps([]);
+      setSidebarOpen(false);
+    }
+
+    if (chatSeed.initialMessage) setInput(chatSeed.initialMessage);
+    followUpContextRef.current = chatSeed.context || null;
+    persistFollowUpContextRef.current = Boolean(chatSeed.persistContext);
+    setActiveContextLabel(chatSeed.contextLabel || chatSeed.context?.context_title || null);
+
+    navigate(location.pathname, { replace: true, state: null });
+  }, [location.pathname, location.state, navigate]);
 
   // Handle follow-up from report page: ?stock=600519&name=贵州茅台&queryId=xxx
   useEffect(() => {
@@ -188,14 +242,14 @@ const ChatPage: React.FC = () => {
             ctx.previous_change_pct = report.meta.changePct;
           }
           followUpContextRef.current = ctx;
+          persistFollowUpContextRef.current = false;
+          setActiveContextLabel(name ? `${name} 追问` : `股票 ${stock} 追问`);
         }).catch(() => {});
       }
       // Clean URL params
       setSearchParams({}, { replace: true });
     }
   }, [searchParams, setSearchParams]);
-
-  const followUpContextRef = useRef<FollowUpContext | null>(null);
 
   const handleSend = async (overrideMessage?: string, overrideStrategy?: string) => {
     const msgText = overrideMessage || input.trim();
@@ -236,7 +290,10 @@ const ChatPage: React.FC = () => {
     // Attach follow-up context if available (data reuse from report page)
     if (followUpContextRef.current) {
       payload.context = followUpContextRef.current;
-      followUpContextRef.current = null; // Use once
+      if (!persistFollowUpContextRef.current) {
+        followUpContextRef.current = null;
+        setActiveContextLabel(null);
+      }
     }
 
     try {
@@ -531,6 +588,15 @@ const ChatPage: React.FC = () => {
           </h1>
           <p className="text-secondary text-sm">向 AI 询问个股分析，获取基于策略的交易建议与实时决策报告。</p>
         </header>
+
+        {activeContextLabel && (
+          <div className="mb-3 flex flex-wrap items-center gap-2 rounded-xl border border-violet-400/20 bg-violet-500/10 px-4 py-3 text-sm">
+            <span className="inline-flex items-center rounded-full border border-violet-300/20 bg-violet-400/15 px-2.5 py-1 text-[11px] font-semibold tracking-[0.14em] text-violet-100 uppercase">
+              当前上下文
+            </span>
+            <span className="text-violet-50">{activeContextLabel}</span>
+          </div>
+        )}
 
         <div className="flex-1 flex flex-col glass-card overflow-hidden min-h-0 relative z-10">
         {/* Messages */}

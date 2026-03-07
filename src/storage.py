@@ -55,6 +55,7 @@ Base = declarative_base()
 
 if TYPE_CHECKING:
     from src.search_service import SearchResponse
+    from src.portfolio.models import HealthReport, Portfolio
 
 
 # === 数据模型定义 ===
@@ -365,6 +366,47 @@ class BacktestSummary(Base):
     )
 
 
+class PortfolioSnapshot(Base):
+    """每日组合快照，用于追踪。"""
+
+    __tablename__ = 'portfolio_snapshots'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    date = Column(Date, nullable=False, index=True)
+    total_value_cny = Column(Float)
+    cash_pct = Column(Float)
+    us_pct = Column(Float)
+    hk_pct = Column(Float)
+    a_pct = Column(Float)
+    crypto_pct = Column(Float)
+    health_score = Column(Integer)
+    health_grade = Column(String(2))
+    holdings_json = Column(Text)
+    review_report = Column(Text)
+    created_at = Column(DateTime, default=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint('date', name='uix_portfolio_date'),
+    )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert snapshot row to API-friendly dict."""
+        return {
+            'date': self.date.isoformat() if self.date else None,
+            'total_value_cny': self.total_value_cny,
+            'cash_pct': self.cash_pct,
+            'us_pct': self.us_pct,
+            'hk_pct': self.hk_pct,
+            'a_pct': self.a_pct,
+            'crypto_pct': self.crypto_pct,
+            'health_score': self.health_score,
+            'health_grade': self.health_grade,
+            'holdings_json': self.holdings_json,
+            'review_report': self.review_report,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+        }
+
+
 class ConversationMessage(Base):
     """
     Agent 对话历史记录表
@@ -517,9 +559,6 @@ class DatabaseManager:
         """
         if target_date is None:
             target_date = date.today()
-        # 注意：这里的 target_date 语义是“自然日”，而不是“最新交易日”。
-        # 在周末/节假日/非交易日运行时，即使数据库已有最新交易日数据，这里也会返回 False。
-        # 该行为目前保留（按需求不改逻辑）。
         
         with self.get_session() as session:
             result = session.execute(
@@ -892,26 +931,104 @@ class DatabaseManager:
             ).scalars().first()
             return result
 
-    def get_latest_analysis_by_query_id(self, query_id: str) -> Optional[AnalysisHistory]:
+    def update_analysis_history_by_id(self, record_id: int, updates: Dict[str, Any]) -> int:
         """
-        根据 query_id 查询最新一条分析历史记录
-
-        query_id 在批量分析时可能重复，故返回最近创建的一条。
+        Update one analysis history record by primary key ID.
 
         Args:
-            query_id: 分析记录关联的 query_id
+            record_id: Analysis history primary key ID.
+            updates: Partial field map to update.
 
         Returns:
-            AnalysisHistory 对象，不存在返回 None
+            Number of updated rows (0 or 1).
+        """
+        allowed_fields = {
+            "query_id",
+            "code",
+            "name",
+            "report_type",
+            "sentiment_score",
+            "operation_advice",
+            "trend_prediction",
+            "analysis_summary",
+            "raw_result",
+            "news_content",
+            "context_snapshot",
+            "ideal_buy",
+            "secondary_buy",
+            "stop_loss",
+            "take_profit",
+        }
+        safe_updates = {k: v for k, v in (updates or {}).items() if k in allowed_fields}
+        if not safe_updates:
+            return 0
+
+        with self.get_session() as session:
+            try:
+                record = session.execute(
+                    select(AnalysisHistory).where(AnalysisHistory.id == record_id)
+                ).scalars().first()
+                if record is None:
+                    return 0
+
+                for key, value in safe_updates.items():
+                    setattr(record, key, value)
+
+                session.commit()
+                return 1
+            except Exception as e:
+                session.rollback()
+                logger.error(f"更新历史记录失败: {e}")
+                return 0
+
+    def delete_analysis_history_by_id(self, record_id: int) -> int:
+        """
+        Delete one analysis history record by primary key ID.
+
+        Returns:
+            Number of deleted analysis_history rows (0 or 1).
         """
         with self.get_session() as session:
-            result = session.execute(
-                select(AnalysisHistory)
-                .where(AnalysisHistory.query_id == query_id)
-                .order_by(desc(AnalysisHistory.created_at))
-                .limit(1)
-            ).scalars().first()
-            return result
+            try:
+                record = session.execute(
+                    select(AnalysisHistory).where(AnalysisHistory.id == record_id)
+                ).scalars().first()
+                if record is None:
+                    return 0
+
+                session.execute(
+                    delete(BacktestResult).where(BacktestResult.analysis_history_id == record_id)
+                )
+
+                exists_same_query_code = session.execute(
+                    select(AnalysisHistory.id).where(
+                        and_(
+                            AnalysisHistory.query_id == record.query_id,
+                            AnalysisHistory.code == record.code,
+                            AnalysisHistory.id != record_id,
+                        )
+                    ).limit(1)
+                ).scalars().first()
+
+                if not exists_same_query_code:
+                    session.execute(
+                        delete(NewsIntel).where(
+                            and_(
+                                NewsIntel.query_id == record.query_id,
+                                NewsIntel.code == record.code,
+                            )
+                        )
+                    )
+
+                result = session.execute(
+                    delete(AnalysisHistory).where(AnalysisHistory.id == record_id)
+                )
+                session.commit()
+                return int(result.rowcount or 0)
+            except Exception as e:
+                session.rollback()
+                logger.error(f"删除历史记录失败: {e}")
+                return 0
     
     def get_data_range(
         self, 
@@ -1059,10 +1176,6 @@ class DatabaseManager:
         """
         if target_date is None:
             target_date = date.today()
-        # 注意：尽管入参提供了 target_date，但当前实现实际使用的是“最新两天数据”（get_latest_data），
-        # 并不会按 target_date 精确取当日/前一交易日的上下文。
-        # 因此若未来需要支持“按历史某天复盘/重算”的可解释性，这里需要调整。
-        # 该行为目前保留（按需求不改逻辑）。
         
         # 获取最近2天数据
         recent_data = self.get_latest_data(code, days=2)
@@ -1108,9 +1221,6 @@ class DatabaseManager:
         - 空头排列：close < ma5 < ma10 < ma20
         - 震荡整理：其他情况
         """
-        # 注意：这里的均线形态判断基于“close/ma5/ma10/ma20”静态比较，
-        # 未考虑均线拐点、斜率、或不同数据源复权口径差异。
-        # 该行为目前保留（按需求不改逻辑）。
         close = data.close or 0
         ma5 = data.ma5 or 0
         ma10 = data.ma10 or 0
@@ -1188,20 +1298,15 @@ class DatabaseManager:
     @staticmethod
     def _parse_sniper_value(value: Any) -> Optional[float]:
         """
-        Parse a sniper point value from various formats to float.
-
-        Handles: numeric types, plain number strings, Chinese price formats
-        like "18.50元", range formats like "18.50-19.00", and text with
-        embedded numbers while filtering out MA indicators.
+        解析狙击点位数值
         """
         if value is None:
             return None
         if isinstance(value, (int, float)):
-            v = float(value)
-            return v if v > 0 else None
+            return float(value)
 
-        text = str(value).replace(',', '').replace('，', '').strip()
-        if not text or text == '-' or text == '—' or text == 'N/A':
+        text = str(value).replace(',', '').strip()
+        if not text:
             return None
 
         # 尝试直接解析纯数字字符串
@@ -1252,30 +1357,11 @@ class DatabaseManager:
 
     def _extract_sniper_points(self, result: Any) -> Dict[str, Optional[float]]:
         """
-        Extract sniper point values from an AnalysisResult.
-
-        Tries multiple extraction paths to handle different dashboard structures:
-        1. result.get_sniper_points() (standard path)
-        2. Direct dashboard dict traversal with various nesting levels
-        3. Fallback from raw_result dict if available
+        抽取狙击点位数据
         """
         raw_points = {}
-
-        # Path 1: standard method
         if hasattr(result, "get_sniper_points"):
             raw_points = result.get_sniper_points() or {}
-
-        # Path 2: direct dashboard traversal when standard path yields empty values
-        if not any(raw_points.get(k) for k in ("ideal_buy", "secondary_buy", "stop_loss", "take_profit")):
-            dashboard = getattr(result, "dashboard", None)
-            if isinstance(dashboard, dict):
-                raw_points = self._find_sniper_in_dashboard(dashboard) or raw_points
-
-        # Path 3: try raw_result for agent mode results
-        if not any(raw_points.get(k) for k in ("ideal_buy", "secondary_buy", "stop_loss", "take_profit")):
-            raw_response = getattr(result, "raw_response", None)
-            if isinstance(raw_response, dict):
-                raw_points = self._find_sniper_in_dashboard(raw_response) or raw_points
 
         return {
             "ideal_buy": self._parse_sniper_value(raw_points.get("ideal_buy")),
@@ -1285,41 +1371,140 @@ class DatabaseManager:
         }
 
     @staticmethod
-    def _find_sniper_in_dashboard(d: dict) -> Optional[Dict[str, Any]]:
-        """
-        Recursively search for sniper_points in a dashboard dict.
-        Handles various nesting: dashboard.battle_plan.sniper_points,
-        dashboard.dashboard.battle_plan.sniper_points, etc.
-        """
-        if not isinstance(d, dict):
+    def _portfolio_total_asset(portfolio: 'Portfolio') -> float:
+        """Return the total asset value in CNY with safe fallback."""
+        total_value = float(getattr(portfolio, 'total_value_cny', 0.0) or 0.0)
+        if total_value > 0:
+            return total_value
+
+        holdings_total = sum(float(getattr(item, 'value_cny', 0.0) or 0.0) for item in getattr(portfolio, 'holdings', []))
+        cash_total = (
+            float(getattr(portfolio, 'cash_cny', 0.0) or 0.0)
+            + float(getattr(portfolio, 'cash_usd', 0.0) or 0.0)
+            + float(getattr(portfolio, 'cash_hkd', 0.0) or 0.0)
+        )
+        crypto_total = (
+            float(getattr(portfolio, 'crypto_value_cny', 0.0) or 0.0)
+            + sum(
+                float(getattr(item, 'value_cny', 0.0) or 0.0)
+                for item in getattr(portfolio, 'holdings', [])
+                if str(getattr(item, 'market', '') or '').upper() == 'CRYPTO'
+            )
+        )
+        return holdings_total + cash_total + crypto_total
+
+    @staticmethod
+    def _portfolio_market_pct(portfolio: 'Portfolio', total_asset: float, markets: Tuple[str, ...]) -> float:
+        """Compute exposure percentage for a set of markets."""
+        if total_asset <= 0:
+            return 0.0
+        value = sum(
+            float(getattr(item, 'value_cny', 0.0) or 0.0)
+            for item in getattr(portfolio, 'holdings', [])
+            if str(getattr(item, 'market', '') or '').upper() in markets
+        )
+        return round(value / total_asset * 100.0, 2)
+
+    def save_portfolio_snapshot(
+        self,
+        snapshot_date: date,
+        portfolio: 'Portfolio',
+        health_report: 'HealthReport',
+        review_report: str,
+    ) -> int:
+        """Insert or update one daily portfolio snapshot."""
+        total_asset = self._portfolio_total_asset(portfolio)
+        cash_total = (
+            float(getattr(portfolio, 'cash_cny', 0.0) or 0.0)
+            + float(getattr(portfolio, 'cash_usd', 0.0) or 0.0)
+            + float(getattr(portfolio, 'cash_hkd', 0.0) or 0.0)
+        )
+        crypto_total = (
+            float(getattr(portfolio, 'crypto_value_cny', 0.0) or 0.0)
+            + sum(
+                float(getattr(item, 'value_cny', 0.0) or 0.0)
+                for item in getattr(portfolio, 'holdings', [])
+                if str(getattr(item, 'market', '') or '').upper() == 'CRYPTO'
+            )
+        )
+        holdings_payload = [
+            {
+                'ticker': getattr(item, 'ticker', ''),
+                'name': getattr(item, 'name', ''),
+                'market': getattr(item, 'market', ''),
+                'shares': float(getattr(item, 'shares', 0.0) or 0.0),
+                'avg_cost': float(getattr(item, 'avg_cost', 0.0) or 0.0),
+                'current_price': float(getattr(item, 'current_price', 0.0) or 0.0),
+                'lot_size': float(getattr(item, 'lot_size', 1.0) or 1.0),
+                'value_cny': float(getattr(item, 'value_cny', 0.0) or 0.0),
+                'weight_pct': float(getattr(item, 'weight_pct', 0.0) or 0.0),
+                'daily_change_pct': float(getattr(item, 'daily_change_pct', 0.0) or 0.0),
+                'sector': getattr(item, 'sector', ''),
+                'style': getattr(item, 'style', ''),
+                'beta_level': getattr(item, 'beta_level', ''),
+            }
+            for item in getattr(portfolio, 'holdings', [])
+        ]
+
+        cash_pct = round(cash_total / total_asset * 100.0, 2) if total_asset > 0 else 0.0
+        crypto_pct = round(crypto_total / total_asset * 100.0, 2) if total_asset > 0 else 0.0
+
+        with self.session_scope() as session:
+            row = session.execute(
+                select(PortfolioSnapshot).filter(PortfolioSnapshot.date == snapshot_date)
+            ).scalar_one_or_none()
+            if row is None:
+                row = PortfolioSnapshot(date=snapshot_date)
+                session.add(row)
+
+            row.created_at = datetime.now()
+            row.total_value_cny = total_asset
+            row.cash_pct = cash_pct
+            row.us_pct = self._portfolio_market_pct(portfolio, total_asset, ('US',))
+            row.hk_pct = self._portfolio_market_pct(portfolio, total_asset, ('HK',))
+            row.a_pct = self._portfolio_market_pct(portfolio, total_asset, ('A',))
+            row.crypto_pct = crypto_pct
+            row.health_score = int(getattr(health_report, 'score', 0) or 0)
+            row.health_grade = str(getattr(health_report, 'grade', '') or '')
+            row.holdings_json = json.dumps(holdings_payload, ensure_ascii=False)
+            row.review_report = review_report
+
+        return 1
+
+    @staticmethod
+    def _serialize_portfolio_snapshot_row(row: Optional['PortfolioSnapshot']) -> Optional[Dict[str, Any]]:
+        """Convert one portfolio snapshot ORM row into primitives inside the session."""
+        if row is None:
             return None
+        return {
+            'date': row.date,
+            'created_at': row.created_at,
+            'total_value_cny': row.total_value_cny,
+            'cash_pct': row.cash_pct,
+            'us_pct': row.us_pct,
+            'hk_pct': row.hk_pct,
+            'a_pct': row.a_pct,
+            'crypto_pct': row.crypto_pct,
+            'health_score': row.health_score,
+            'health_grade': row.health_grade,
+            'holdings_json': row.holdings_json,
+            'review_report': row.review_report,
+        }
 
-        # Direct: d has sniper_points keys at top level
-        if "ideal_buy" in d:
-            return d
+    def get_latest_portfolio_snapshot(self) -> Optional[Dict[str, Any]]:
+        """Return the latest persisted portfolio snapshot as plain data."""
+        with self.session_scope() as session:
+            stmt = select(PortfolioSnapshot).order_by(desc(PortfolioSnapshot.date)).limit(1)
+            row = session.execute(stmt).scalar_one_or_none()
+            return self._serialize_portfolio_snapshot_row(row)
 
-        # d.sniper_points
-        sp = d.get("sniper_points")
-        if isinstance(sp, dict) and sp:
-            return sp
-
-        # d.battle_plan.sniper_points
-        bp = d.get("battle_plan")
-        if isinstance(bp, dict):
-            sp = bp.get("sniper_points")
-            if isinstance(sp, dict) and sp:
-                return sp
-
-        # d.dashboard.battle_plan.sniper_points (double-nested)
-        inner = d.get("dashboard")
-        if isinstance(inner, dict):
-            bp = inner.get("battle_plan")
-            if isinstance(bp, dict):
-                sp = bp.get("sniper_points")
-                if isinstance(sp, dict) and sp:
-                    return sp
-
-        return None
+    def list_portfolio_snapshots(self, limit: int = 120) -> List[Dict[str, Any]]:
+        """Return recent portfolio snapshots ordered by date descending as plain data."""
+        safe_limit = max(1, min(3650, int(limit or 120)))
+        with self.session_scope() as session:
+            stmt = select(PortfolioSnapshot).order_by(desc(PortfolioSnapshot.date)).limit(safe_limit)
+            rows = session.execute(stmt).scalars().all()
+            return [item for item in (self._serialize_portfolio_snapshot_row(row) for row in rows) if item is not None]
 
     @staticmethod
     def _build_fallback_url_key(

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type React from 'react';
 import { EyeToggleIcon, Select } from '../common';
+import { PortfolioConfigEditor } from './PortfolioConfigEditor';
 import type { ConfigValidationIssue, SystemConfigItem } from '../../types/systemConfig';
 import { getFieldDescriptionZh, getFieldTitleZh } from '../../utils/systemConfigI18n';
 
@@ -34,6 +35,7 @@ function renderFieldControl(
   item: SystemConfigItem,
   value: string,
   disabled: boolean,
+  issues: ConfigValidationIssue[],
   onChange: (nextValue: string) => void,
   isSecretVisible: boolean,
   onToggleSecretVisible: () => void,
@@ -44,6 +46,18 @@ function renderFieldControl(
   const commonClass = 'input-terminal';
   const controlType = schema?.uiControl ?? 'text';
   const isMultiValue = isMultiValueField(item);
+
+  if (item.key === 'PORTFOLIO_HOLDINGS' || item.key === 'PORTFOLIO_STOCK_TAGS') {
+    return (
+      <PortfolioConfigEditor
+        configKey={item.key}
+        value={value}
+        disabled={disabled || !schema?.isEditable}
+        issues={issues}
+        onChange={onChange}
+      />
+    );
+  }
 
   if (controlType === 'textarea') {
     return (
@@ -217,6 +231,7 @@ export const SettingsField: React.FC<SettingsFieldProps> = ({
           item,
           value,
           disabled,
+          issues,
           (nextValue) => onChange(item.key, nextValue),
           isSecretVisible,
           () => setIsSecretVisible((previous) => !previous),

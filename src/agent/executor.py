@@ -334,8 +334,12 @@ class AgentExecutor:
             skills_section = f"## 激活的交易策略\n\n{self.skill_instructions}"
         system_prompt = AGENT_SYSTEM_PROMPT.format(skills_section=skills_section)
 
-        # Build tool declarations in OpenAI format (litellm handles all providers)
-        tool_decls = self.tool_registry.to_openai_tools()
+        # Build tool declarations for all providers
+        tool_decls = {
+            "gemini": self.tool_registry.to_gemini_declarations(),
+            "openai": self.tool_registry.to_openai_tools(),
+            "anthropic": self.tool_registry.to_anthropic_tools(),
+        }
 
         # Initialize conversation
         messages: List[Dict[str, Any]] = [
@@ -369,8 +373,12 @@ class AgentExecutor:
             skills_section = f"## 激活的交易策略\n\n{self.skill_instructions}"
         system_prompt = CHAT_SYSTEM_PROMPT.format(skills_section=skills_section)
 
-        # Build tool declarations in OpenAI format (litellm handles all providers)
-        tool_decls = self.tool_registry.to_openai_tools()
+        # Build tool declarations for all providers
+        tool_decls = {
+            "gemini": self.tool_registry.to_gemini_declarations(),
+            "openai": self.tool_registry.to_openai_tools(),
+            "anthropic": self.tool_registry.to_anthropic_tools(),
+        }
 
         # Get conversation history
         session = conversation_manager.get_or_create(session_id)
@@ -383,28 +391,15 @@ class AgentExecutor:
         messages.extend(history)
 
         # Inject previous analysis context if provided (data reuse from report follow-up)
-        if context:
-            context_parts = []
-            if context.get("stock_code"):
-                context_parts.append(f"股票代码: {context['stock_code']}")
-            if context.get("stock_name"):
-                context_parts.append(f"股票名称: {context['stock_name']}")
-            if context.get("previous_price"):
-                context_parts.append(f"上次分析价格: {context['previous_price']}")
-            if context.get("previous_change_pct"):
-                context_parts.append(f"上次涨跌幅: {context['previous_change_pct']}%")
-            if context.get("previous_analysis_summary"):
-                summary = context["previous_analysis_summary"]
-                summary_text = json.dumps(summary, ensure_ascii=False) if isinstance(summary, dict) else str(summary)
-                context_parts.append(f"上次分析摘要:\n{summary_text}")
-            if context.get("previous_strategy"):
-                strategy = context["previous_strategy"]
-                strategy_text = json.dumps(strategy, ensure_ascii=False) if isinstance(strategy, dict) else str(strategy)
-                context_parts.append(f"上次策略分析:\n{strategy_text}")
-            if context_parts:
-                context_msg = "[系统提供的历史分析上下文，可供参考对比]\n" + "\n".join(context_parts)
-                messages.append({"role": "user", "content": context_msg})
-                messages.append({"role": "assistant", "content": "好的，我已了解该股票的历史分析数据。请告诉我你想了解什么？"})
+        context_msg = self._build_chat_context_message(context)
+        if context_msg:
+            messages.append({"role": "user", "content": context_msg})
+            ack = "好的，我已了解这份上下文。请告诉我你想继续追问什么？"
+            if context and context.get("stock_code"):
+                ack = "好的，我已了解该股票的历史分析数据。请告诉我你想了解什么？"
+            elif context and context.get("report_type") == "portfolio_review":
+                ack = "好的，我已加载今天的组合复盘上下文。你可以继续追问组合、市场和调仓问题。"
+            messages.append({"role": "assistant", "content": ack})
 
         messages.append({"role": "user", "content": message})
 
@@ -422,7 +417,62 @@ class AgentExecutor:
 
         return result
 
-    def _run_loop(self, messages: List[Dict[str, Any]], tool_decls: List[Dict[str, Any]], start_time: float, tool_calls_log: List[Dict[str, Any]], total_tokens: int, parse_dashboard: bool, progress_callback: Optional[Callable] = None) -> AgentResult:
+    def _build_chat_context_message(self, context: Optional[Dict[str, Any]] = None) -> Optional[str]:
+        """Build a synthetic context message injected ahead of the user turn."""
+        if not context:
+            return None
+
+        if context.get("report_type") == "portfolio_review":
+            context_parts = []
+            if context.get("context_title"):
+                context_parts.append(f"上下文标题: {context['context_title']}")
+            if context.get("review_date"):
+                context_parts.append(f"复盘日期: {context['review_date']}")
+            if context.get("generated_at"):
+                context_parts.append(f"生成时间: {context['generated_at']}")
+            if context.get("portfolio_snapshot"):
+                snapshot = context["portfolio_snapshot"]
+                snapshot_text = json.dumps(snapshot, ensure_ascii=False) if isinstance(snapshot, dict) else str(snapshot)
+                context_parts.append(f"组合现状:\n{snapshot_text}")
+            if context.get("portfolio_target"):
+                target = context["portfolio_target"]
+                target_text = json.dumps(target, ensure_ascii=False) if isinstance(target, dict) else str(target)
+                context_parts.append(f"组合目标:\n{target_text}")
+            if context.get("portfolio_holdings"):
+                holdings = context["portfolio_holdings"]
+                holdings_text = json.dumps(holdings, ensure_ascii=False) if isinstance(holdings, list) else str(holdings)
+                context_parts.append(f"当前持仓摘要:\n{holdings_text}")
+            if context.get("market_summary"):
+                market = context["market_summary"]
+                market_text = json.dumps(market, ensure_ascii=False) if isinstance(market, list) else str(market)
+                context_parts.append(f"市场情况:\n{market_text}")
+            if context.get("portfolio_review_report"):
+                context_parts.append(f"今日组合复盘全文:\n{context['portfolio_review_report']}")
+            if context_parts:
+                return "[系统提供的组合复盘答疑上下文，可供回答时优先参考]\n" + "\n".join(context_parts)
+
+        context_parts = []
+        if context.get("stock_code"):
+            context_parts.append(f"股票代码: {context['stock_code']}")
+        if context.get("stock_name"):
+            context_parts.append(f"股票名称: {context['stock_name']}")
+        if context.get("previous_price"):
+            context_parts.append(f"上次分析价格: {context['previous_price']}")
+        if context.get("previous_change_pct"):
+            context_parts.append(f"上次涨跌幅: {context['previous_change_pct']}%")
+        if context.get("previous_analysis_summary"):
+            summary = context["previous_analysis_summary"]
+            summary_text = json.dumps(summary, ensure_ascii=False) if isinstance(summary, dict) else str(summary)
+            context_parts.append(f"上次分析摘要:\n{summary_text}")
+        if context.get("previous_strategy"):
+            strategy = context["previous_strategy"]
+            strategy_text = json.dumps(strategy, ensure_ascii=False) if isinstance(strategy, dict) else str(strategy)
+            context_parts.append(f"上次策略分析:\n{strategy_text}")
+        if context_parts:
+            return "[系统提供的历史分析上下文，可供参考对比]\n" + "\n".join(context_parts)
+        return None
+
+    def _run_loop(self, messages: List[Dict[str, Any]], tool_decls: Dict[str, Any], start_time: float, tool_calls_log: List[Dict[str, Any]], total_tokens: int, parse_dashboard: bool, progress_callback: Optional[Callable] = None) -> AgentResult:
         provider_used = ""
 
         for step in range(self.max_steps):

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
@@ -185,12 +186,14 @@ class SystemConfigService:
         data_type = field_schema.get("data_type", "string")
         validation = field_schema.get("validation", {}) or {}
         is_required = field_schema.get("is_required", False)
+        ui_control = field_schema.get("ui_control", "text")
 
         # Empty values are valid for non-required fields (skip type validation)
         if not value.strip() and not is_required:
             return issues
 
-        if "\n" in value:
+        allows_multiline = ui_control == "textarea" or validation.get("format") == "json"
+        if "\n" in value and not allows_multiline:
             issues.append(
                 {
                     "key": key,
@@ -258,6 +261,21 @@ class SystemConfigService:
                         "message": "Value must be in HH:MM format",
                         "severity": "error",
                         "expected": "HH:MM",
+                        "actual": value,
+                }
+            )
+
+        if validation.get("format") == "json":
+            try:
+                json.loads(value)
+            except json.JSONDecodeError:
+                issues.append(
+                    {
+                        "key": key,
+                        "code": "invalid_format",
+                        "message": "Value must be valid JSON",
+                        "severity": "error",
+                        "expected": "valid JSON",
                         "actual": value,
                     }
                 )

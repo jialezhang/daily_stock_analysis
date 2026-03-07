@@ -25,6 +25,7 @@ const CATEGORY_DISPLAY_ORDER: Record<string, number> = {
   ai_model: 20,
   data_source: 30,
   notification: 40,
+  portfolio: 45,
   system: 50,
   agent: 55,
   backtest: 60,

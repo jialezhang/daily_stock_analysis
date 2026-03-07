@@ -17,8 +17,14 @@ from typing import Optional
 from src.config import get_config
 from src.notification import NotificationService
 from src.market_analyzer import MarketAnalyzer
+from src.portfolio.runner import (
+    build_portfolio_from_config,
+    build_portfolio_from_position_management_module,
+    run_portfolio_review,
+)
 from src.search_service import SearchService
 from src.analyzer import GeminiAnalyzer
+from src.services.position_management_service import PositionManagementService
 
 
 logger = logging.getLogger(__name__)
@@ -110,6 +116,25 @@ def run_market_review(
                     logger.warning("大盘复盘推送失败")
             elif not send_notification:
                 logger.info("已跳过推送通知 (--no-notify)")
+
+            if getattr(config, 'portfolio_enabled', False):
+                position_module = None
+                try:
+                    position_module = PositionManagementService().get_module().get("module")
+                except Exception as exc:
+                    logger.warning("读取仓位管理模块失败，将回退到 PORTFOLIO_HOLDINGS: %s", exc)
+                portfolio = build_portfolio_from_position_management_module(position_module, config=config)
+                if portfolio is None:
+                    portfolio = build_portfolio_from_config(config)
+                if portfolio is None:
+                    logger.warning("组合复盘已启用，但仓位管理模块和 PORTFOLIO_HOLDINGS 都不可用")
+                else:
+                    run_portfolio_review(
+                        portfolio=portfolio,
+                        notifier=notifier,
+                        analyzer=analyzer,
+                        send_notification=send_notification,
+                    )
             
             return review_report
         

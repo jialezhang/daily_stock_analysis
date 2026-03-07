@@ -3,6 +3,7 @@ export type SystemConfigCategory =
   | 'data_source'
   | 'ai_model'
   | 'notification'
+  | 'portfolio'
   | 'system'
   | 'agent'
   | 'backtest'

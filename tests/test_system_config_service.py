@@ -82,5 +82,23 @@ class SystemConfigServiceTestCase(unittest.TestCase):
             )
 
 
+    def test_validate_accepts_multiline_portfolio_json(self) -> None:
+        validation = self.service.validate(
+            items=[
+                {
+                    "key": "PORTFOLIO_HOLDINGS",
+                    "value": '{\n  "total_value_cny": 1000000,\n  "holdings": [{"ticker": "NVDA", "market": "US", "value_cny": 300000}]\n}',
+                }
+            ]
+        )
+        self.assertTrue(validation["valid"])
+        self.assertEqual(validation["issues"], [])
+
+    def test_validate_rejects_invalid_portfolio_json(self) -> None:
+        validation = self.service.validate(items=[{"key": "PORTFOLIO_HOLDINGS", "value": '{invalid'}])
+        self.assertFalse(validation["valid"])
+        self.assertTrue(any(issue["code"] == "invalid_format" for issue in validation["issues"]))
+
+
 if __name__ == "__main__":
     unittest.main()

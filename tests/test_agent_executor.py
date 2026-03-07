@@ -357,6 +357,26 @@ class TestBuildUserMessage(unittest.TestCase):
         self.assertIn("股票代码: 600519", msg)
         self.assertIn("报告类型: daily", msg)
 
+    def test_build_chat_context_message_for_portfolio_review(self):
+        msg = self.executor._build_chat_context_message(
+            {
+                "report_type": "portfolio_review",
+                "context_title": "每日复盘答疑",
+                "review_date": "2026-03-07",
+                "generated_at": "2026-03-07T22:24:17",
+                "portfolio_snapshot": {"total_value_cny": 1290758.41, "health_score": 20},
+                "market_summary": [{"market": "美股", "environment": "谨慎 (-3)"}],
+                "portfolio_review_report": "# 组合每日复盘\n## AI 建议\n- 示例",
+            }
+        )
+        self.assertIsNotNone(msg)
+        if msg is None:
+            self.fail("context message should not be None")
+        self.assertIn("组合复盘答疑上下文", msg)
+        self.assertIn("组合现状", msg)
+        self.assertIn("市场情况", msg)
+        self.assertIn("今日组合复盘全文", msg)
+
 
 # ============================================================
 # AgentResult dataclass

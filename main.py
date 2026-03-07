@@ -41,17 +41,26 @@ import sys
 import time
 import uuid
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 from data_provider.base import canonical_stock_code
 from src.core.pipeline import StockAnalysisPipeline
 from src.core.market_review import run_market_review
-from src.webui_frontend import prepare_webui_frontend_assets
+from src.core.position_review import run_position_daily_review
+from src.portfolio.runner import (
+    build_portfolio_from_config,
+    build_portfolio_from_position_management_module,
+    run_portfolio_review,
+)
+from src.services.position_management_service import PositionManagementService
+
 from src.config import get_config, Config
 from src.logging_config import setup_logging
 
 
 logger = logging.getLogger(__name__)
+LOCKED_WEB_PORT = 8001
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -69,6 +78,7 @@ def parse_arguments() -> argparse.Namespace:
   python main.py --single-notify    # 启用单股推送模式（每分析完一只立即推送）
   python main.py --schedule         # 启用定时任务模式
   python main.py --market-review    # 仅运行大盘复盘
+  python main.py --portfolio-review # 仅运行组合复盘
         '''
     )
 
@@ -128,6 +138,12 @@ def parse_arguments() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        '--portfolio-review',
+        action='store_true',
+        help='仅运行组合复盘分析'
+    )
+
+    parser.add_argument(
         '--no-market-review',
         action='store_true',
         help='跳过大盘复盘分析'
@@ -166,8 +182,8 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         '--port',
         type=int,
-        default=8000,
-        help='FastAPI 服务端口（默认 8000）'
+        default=LOCKED_WEB_PORT,
+        help='FastAPI 服务端口（固定 8001）'
     )
 
     parser.add_argument(
@@ -266,10 +282,6 @@ def run_full_analysis(
     这是定时任务调用的主函数
     """
     try:
-        # Issue #529: Hot-reload STOCK_LIST from .env on each scheduled run
-        if stock_codes is None:
-            config.refresh_stock_list()
-
         # Issue #373: Trading day filter (per-stock, per-market)
         effective_codes = stock_codes if stock_codes is not None else config.stock_list
         filtered_codes, effective_region, should_skip = _compute_trading_day_filter(
@@ -347,6 +359,14 @@ def run_full_analysis(
             # 如果有结果，赋值给 market_report 用于后续飞书文档生成
             if review_result:
                 market_report = review_result
+
+        # 3. 每日仓位复盘（Telegram）
+        run_position_daily_review(
+            notifier=pipeline.notifier,
+            analyzer=pipeline.analyzer,
+            market_report=market_report,
+            send_notification=not args.no_notify,
+        )
 
         # Issue #190: 合并推送（个股+大盘复盘）
         if merge_notification and (results or market_report) and not args.no_notify:
@@ -463,11 +483,6 @@ def start_api_server(host: str, port: int, config: Config) -> None:
     logger.info(f"FastAPI 服务已启动: http://{host}:{port}")
 
 
-def _is_truthy_env(var_name: str, default: str = "true") -> bool:
-    """Parse common truthy / falsy environment values."""
-    value = os.getenv(var_name, default).strip().lower()
-    return value not in {"0", "false", "no", "off"}
-
 def start_bot_stream_clients(config: Config) -> None:
     """Start bot stream clients when enabled in config."""
     # 启动钉钉 Stream 客户端
@@ -546,17 +561,16 @@ def main() -> int:
     # === 启动 Web 服务 (如果启用) ===
     start_serve = (args.serve or args.serve_only) and os.getenv("GITHUB_ACTIONS") != "true"
 
-    # 兼容旧版 WEBUI_HOST/WEBUI_PORT：如果用户未通过 --host/--port 指定，则使用旧变量
+    # 兼容旧版 WEBUI_HOST；端口统一固定为 8001
     if start_serve:
         if args.host == '0.0.0.0' and os.getenv('WEBUI_HOST'):
             args.host = os.getenv('WEBUI_HOST')
-        if args.port == 8000 and os.getenv('WEBUI_PORT'):
-            args.port = int(os.getenv('WEBUI_PORT'))
+        if args.port != LOCKED_WEB_PORT:
+            logger.warning("检测到非标准端口 %s，已强制切换为 %s", args.port, LOCKED_WEB_PORT)
+        args.port = LOCKED_WEB_PORT
 
     bot_clients_started = False
     if start_serve:
-        if not prepare_webui_frontend_assets():
-            logger.warning("前端静态资源未就绪，继续启动 FastAPI 服务（Web 页面可能不可用）")
         try:
             start_api_server(host=args.host, port=args.port, config=config)
             bot_clients_started = True
@@ -598,7 +612,45 @@ def main() -> int:
             )
             return 0
 
-        # 模式1: 仅大盘复盘
+        # 模式1: 仅组合复盘
+        if getattr(args, 'portfolio_review', False):
+            from src.analyzer import GeminiAnalyzer
+            from src.notification import NotificationService
+
+            logger.info("模式: 仅组合复盘")
+            notifier = NotificationService()
+            analyzer = None
+
+            if config.gemini_api_key or config.openai_api_key:
+                analyzer = GeminiAnalyzer(api_key=config.gemini_api_key)
+                if not analyzer.is_available():
+                    logger.warning("AI 分析器初始化后不可用，请检查 API Key 配置")
+                    analyzer = None
+            else:
+                logger.warning("未检测到 API Key (Gemini/OpenAI)，将仅使用模板生成组合复盘")
+
+            position_module = None
+            try:
+                position_module = PositionManagementService().get_module().get("module")
+            except Exception as exc:
+                logger.warning("读取仓位管理模块失败，将回退到 PORTFOLIO_HOLDINGS: %s", exc)
+
+            portfolio = build_portfolio_from_position_management_module(position_module, config=config)
+            if portfolio is None:
+                portfolio = build_portfolio_from_config(config)
+            if portfolio is None:
+                logger.warning("仓位管理模块和 PORTFOLIO_HOLDINGS 都不可用，跳过组合复盘")
+                return 0
+
+            run_portfolio_review(
+                portfolio=portfolio,
+                notifier=notifier,
+                analyzer=analyzer,
+                send_notification=not args.no_notify,
+            )
+            return 0
+
+        # 模式2: 仅大盘复盘
         if args.market_review:
             from src.analyzer import GeminiAnalyzer
             from src.core.market_review import run_market_review
@@ -653,7 +705,7 @@ def main() -> int:
             )
             return 0
 
-        # 模式2: 定时任务模式
+        # 模式3: 定时任务模式
         if args.schedule or config.schedule_enabled:
             logger.info("模式: 定时任务")
             logger.info(f"每日执行时间: {config.schedule_time}")
@@ -664,7 +716,7 @@ def main() -> int:
             should_run_immediately = config.schedule_run_immediately
             if getattr(args, 'no_run_immediately', False):
                 should_run_immediately = False
-
+            
             logger.info(f"启动时立即执行: {should_run_immediately}")
 
             from src.scheduler import run_with_schedule
@@ -679,7 +731,7 @@ def main() -> int:
             )
             return 0
 
-        # 模式3: 正常单次运行
+        # 模式4: 正常单次运行
         if config.run_immediately:
             run_full_analysis(config, args, stock_codes)
         else:

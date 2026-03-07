@@ -252,6 +252,11 @@ class Config:
     market_review_region: str = "cn"
     # 交易日检查：默认启用，非交易日跳过执行；设为 false 或 --force-run 可强制执行（Issue #373）
     trading_day_check_enabled: bool = True
+    portfolio_enabled: bool = False
+    portfolio_initial_capital: float = 1_400_000.0
+    portfolio_target_return: float = 0.30
+    portfolio_holdings_json: str = ""
+    portfolio_stock_tags_json: str = ""
 
     # === 实时行情增强数据配置 ===
     # 实时行情开关（关闭后使用历史收盘价进行分析）
@@ -659,6 +664,11 @@ class Config:
                 os.getenv('MARKET_REVIEW_REGION', 'cn')
             ),
             trading_day_check_enabled=os.getenv('TRADING_DAY_CHECK_ENABLED', 'true').lower() != 'false',
+            portfolio_enabled=os.getenv('PORTFOLIO_ENABLED', 'false').lower() == 'true',
+            portfolio_initial_capital=float(os.getenv('PORTFOLIO_INITIAL_CAPITAL', '1400000')),
+            portfolio_target_return=float(os.getenv('PORTFOLIO_TARGET_RETURN', '0.30')),
+            portfolio_holdings_json=os.getenv('PORTFOLIO_HOLDINGS', '').strip(),
+            portfolio_stock_tags_json=os.getenv('PORTFOLIO_STOCK_TAGS', '').strip(),
             webui_enabled=os.getenv('WEBUI_ENABLED', 'false').lower() == 'true',
             webui_host=os.getenv('WEBUI_HOST', '127.0.0.1'),
             webui_port=int(os.getenv('WEBUI_PORT', '8000')),
